@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 SOURCE = "cian"
 SOURCE_NAME = "Циан"
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache" / "cian"
+DEMO_DIR = Path(__file__).resolve().parent.parent / "data" / "demo" / "cian"  # срез для демо (в git): Казань и Москва, 2 комнаты
 CACHE_TTL = 30 * 60
 SNAPSHOT_VERSION = 2  # 2 — без долей; срезы другой версии не используем
 MIN_INTERVAL = 3.0
@@ -277,8 +278,13 @@ async def _fetch_page(city: str, rooms: int, budget: int | None, page: int, okru
     return offers, name
 
 
-def _snapshot_path(city: str, rooms: int) -> Path:
-    return CACHE_DIR / f"{REGIONS[city][0]}_{rooms}.json"
+def _snapshot_path(city: str, rooms: int, base: Path | None = None) -> Path:
+    return (base or CACHE_DIR) / f"{REGIONS[city][0]}_{rooms}.json"
+
+
+def demo_mode() -> bool:
+    from ..config import settings
+    return settings.demo
 
 
 def _okrug_ok(x: dict, okrug: str | None) -> bool:
@@ -289,7 +295,7 @@ def _save_snapshot(city: str, rooms: int, listings: list[dict]) -> None:
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         path = _snapshot_path(city, rooms)
-        old = load_snapshot(city, rooms)[0]
+        old = load_snapshot(city, rooms, allow_demo=False)[0]
         merged = {x["id"]: x for x in old} | {x["id"]: x for x in listings}
         path.write_text(json.dumps({"version": SNAPSHOT_VERSION, "fetched_at": datetime.now().isoformat(timespec="minutes"),
                                     "listings": list(merged.values())}, ensure_ascii=False), encoding="utf-8")
@@ -297,8 +303,12 @@ def _save_snapshot(city: str, rooms: int, listings: list[dict]) -> None:
         log.warning("не удалось сохранить срез Циана: %s", exc)
 
 
-def load_snapshot(city: str, rooms: int) -> tuple[list[dict], str | None]:
+def load_snapshot(city: str, rooms: int, allow_demo: bool = True) -> tuple[list[dict], str | None]:
+    """Сохранённый срез: локальный кеш, а если его нет (или включён демо-режим) — демо-срез из репозитория."""
     path = _snapshot_path(city, rooms)
+    demo = _snapshot_path(city, rooms, DEMO_DIR)
+    if allow_demo and (demo_mode() or not path.exists()):
+        path = demo
     if not path.exists():
         return [], None
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -311,6 +321,14 @@ async def search(city: str, rooms: int, budget: int | None, page: int = 1, okrug
     """Возвращает (объявления, отчёт). Отчёт: status live | cached | snapshot | unavailable."""
     if not supported(city):
         raise SourceUnavailable(f"для города «{city}» площадка не подключена")
+    if demo_mode():  # без сети: только демо-срез, одна «страница»
+        if page > 1:
+            raise SourceUnavailable("демо-режим: больше страниц нет")
+        saved, fetched_at = load_snapshot(city, rooms)
+        saved = [x for x in saved if (not budget or x["price"] <= budget * 1.05) and _okrug_ok(x, okrug)]
+        if not saved:
+            raise SourceUnavailable(f"демо-режим: нет сохранённых объявлений для «{city}», {rooms}-комн.")
+        return saved, {"status": "demo", "note": f"демо-режим: сохранённый срез Циана от {fetched_at}"}
     key = (city, rooms, budget, page, okrug)
     hit = _memory.get(key)
     if hit and time.time() - hit[0] < CACHE_TTL:

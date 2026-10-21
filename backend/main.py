@@ -65,6 +65,7 @@ async def health():
         "configured": settings.llm_provider,
         "reason": getattr(llm, "reason", None),
         "cities": sources.SUPPORTED_CITIES,
+        "demo": settings.demo,
         "stt": stt.status(),
     }
 

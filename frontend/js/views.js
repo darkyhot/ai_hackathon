@@ -194,8 +194,8 @@ function mortgage(m) {
 // ------------------------------------------------------------------ поиск и цена
 
 function sourceChip(r) {
-  const label = { live: "живые данные", cached: "кеш сессии", snapshot: "сохранённый срез", unavailable: "недоступен" }[r.status] || r.status;
-  const cls = r.status === "unavailable" ? "tag-red" : r.status === "snapshot" ? "tag-amber" : "tag-green";
+  const label = { live: "живые данные", cached: "кеш сессии", snapshot: "сохранённый срез", demo: "демо-срез", unavailable: "недоступен" }[r.status] || r.status;
+  const cls = r.status === "unavailable" ? "tag-red" : r.status === "snapshot" || r.status === "demo" ? "tag-amber" : "tag-green";
   return html`<span class="source-chip"><b>${r.source}</b> ${r.count} ${plural(r.count, "объявление", "объявления", "объявлений")} <span class="tag ${cls}">${label}</span></span>`;
 }
 

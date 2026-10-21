@@ -20,6 +20,8 @@ def _bool(name: str, default: bool) -> bool:
 class Settings:
     llm_provider: str = os.getenv("LLM_PROVIDER", "deepseek").strip().lower()
     llm_fallback_to_mock: bool = _bool("LLM_FALLBACK_TO_MOCK", True)
+    # Демо-режим: объявления — из сохранённого среза Циана в репозитории (backend/data/demo), без сети
+    demo: bool = _bool("DEMO", False)
 
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
     deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
