@@ -266,8 +266,32 @@ def _is_qrator(status: int, text: str) -> bool:
     return status in (401, 403, 429) or ("__qrator" in text and "__SSR_STATE__" not in text)
 
 
+SESSION_FILE = CACHE_DIR / "session.json"   # «пропуск» Qrator после прохода браузером: cookie + User-Agent
+BROWSER_MODES = ["headless", "window"]     # CLI --window: сразу с окном
+
+
+def _load_session() -> dict:
+    try:
+        return json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_session(ua: str, cookies: list[dict]) -> None:
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        jar = {c["name"]: c["value"] for c in cookies if "domclick" in (c.get("domain") or "")}
+        SESSION_FILE.write_text(json.dumps({"ua": ua, "cookies": jar, "saved_at": datetime.now().isoformat(timespec="minutes")},
+                                           ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        log.warning("не удалось сохранить сессию Домклика: %s", exc)
+
+
 async def _get_httpx(url: str) -> tuple[int, str]:
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=HEADERS,
+    """Обычный запрос; если браузер уже прошёл проверку — с его cookie и User-Agent (быстро, без браузера)."""
+    sess = _load_session()
+    headers = {**HEADERS, **({"User-Agent": sess["ua"]} if sess.get("ua") else {})}
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=headers, cookies=sess.get("cookies") or {},
                                  transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0")) as http:
         r = await http.get(url)
     return r.status_code, r.text
@@ -281,19 +305,69 @@ async def _get_browser_like(url: str) -> tuple[int, str]:
     return r.status_code, r.text
 
 
+STEALTH = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+
+
 async def _get_playwright(url: str) -> tuple[int, str]:
-    """Настоящий браузер: проходит проверку Qrator на JavaScript. Нужен pip install playwright + chromium."""
+    """Настоящий Chrome: проходит проверку Qrator на JavaScript. Сначала без окна (полноценный режим Chrome,
+    без признаков автоматизации), не вышло — с окном за краем экрана. Профиль браузера хранится в кеше,
+    поэтому пропуск Qrator переживает перезапуск; после прохода cookie уходят в обычные запросы."""
     from playwright.async_api import async_playwright
 
+    profile = CACHE_DIR / "browser-profile"
+    profile.mkdir(parents=True, exist_ok=True)
+    last = "нет ответа"
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        try:
-            page = await browser.new_page(locale="ru-RU", user_agent=HEADERS["User-Agent"])
-            resp = await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            await page.wait_for_function("document.documentElement.innerHTML.includes('__SSR_STATE__')", timeout=25_000)
-            return (resp.status if resp else 200), await page.content()
-        finally:
-            await browser.close()
+
+        async def launch(mode: str, ua: str | None):
+            args = ["--disable-blink-features=AutomationControlled", "--lang=ru-RU"]
+            if mode == "window":
+                args += ["--window-position=-2400,0", "--window-size=1280,900"]
+            ctx = await p.chromium.launch_persistent_context(
+                str(profile), headless=(mode == "headless"), channel="chromium", args=args, locale="ru-RU",
+                viewport={"width": 1280, "height": 900}, **({"user_agent": ua} if ua else {}))
+            await ctx.add_init_script(STEALTH)
+            await ctx.set_extra_http_headers({"Accept-Language": "ru-RU,ru;q=0.9"})
+            return ctx
+
+        for mode in BROWSER_MODES:
+            ctx = None
+            try:
+                ctx = await launch(mode, None)
+                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                real_ua = await page.evaluate("navigator.userAgent")
+                ua = real_ua.replace("HeadlessChrome", "Chrome")
+                if ua != real_ua:  # без окна Chrome выдаёт себя словом HeadlessChrome — перезапускаем с обычным
+                    await ctx.close()
+                    ctx = await launch(mode, ua)
+                    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                deadline = time.monotonic() + 35
+                while time.monotonic() < deadline:  # Qrator проверяет JS и перезагружает страницу
+                    await asyncio.sleep(1)
+                    try:
+                        html = await page.content()
+                    except Exception:  # страница как раз перезагружается
+                        continue
+                    if "__SSR_STATE__" in html:
+                        _save_session(ua, await ctx.cookies())
+                        log.info("Домклик: браузер (%s) прошёл проверку Qrator", mode)
+                        return 200, html
+                last = f"{mode}: не дождался объявлений за 35 с"
+                try:  # снимок для разбора: что показала защита
+                    await page.screenshot(path=str(CACHE_DIR / f"debug_{mode}.png"))
+                    (CACHE_DIR / f"debug_{mode}.html").write_text((await page.content())[:20000], encoding="utf-8")
+                except Exception:
+                    pass
+            except Exception as exc:
+                last = f"{mode}: {type(exc).__name__}: {str(exc)[:120]}"
+            finally:
+                if ctx is not None:
+                    try:
+                        await ctx.close()
+                    except Exception:
+                        pass
+    return 401, f"__qrator ({last})"
 
 
 async def _fetch_page(city: str, rooms: int, budget: int | None, page: int, new: bool) -> tuple[list[dict], str]:
@@ -319,7 +393,7 @@ async def _fetch_page(city: str, rooms: int, budget: int | None, page: int, new:
                 problem = f"{name}: {type(exc).__name__}"
                 continue
             if _is_qrator(status, text):
-                problem = f"{name}: защита Qrator"
+                problem = f"{name}: защита Qrator" + (f" — {text[10:-1]}" if text.startswith("__qrator (") else "")
                 log.info("Домклик через %s: защита Qrator — пробую дальше", name)
                 continue
             state = extract_state(text)
@@ -418,8 +492,11 @@ if __name__ == "__main__":  # проверка с ноутбука и прогр
     ap.add_argument("--pages", type=int, default=2)
     ap.add_argument("--new", action="store_true", help="новостройки вместо вторички")
     ap.add_argument("--dump", action="store_true", help="сохранить сырые карточки (для проверки разбора)")
+    ap.add_argument("--window", action="store_true", help="браузер сразу с окном (если без окна не пускает)")
     args = ap.parse_args()
     DUMP_RAW = args.dump
+    if args.window:
+        BROWSER_MODES[:] = ["window"]
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     async def main():
