@@ -79,13 +79,13 @@ def supported(city: str | None) -> bool:
     return city in REGIONS
 
 
-def build_url(city: str, rooms: int, budget: int | None, page: int = 1, okrug: str | None = None) -> str:
-    """Свежие объявления вторички, только целые квартиры (flat_share=2 — без долей);
-    сортировка по дате — без перекоса в продвигаемые премиум-объекты."""
+def build_url(city: str, rooms: int, budget: int | None, page: int = 1, okrug: str | None = None, new: bool = False) -> str:
+    """Свежие объявления, только целые квартиры (flat_share=2 — без долей);
+    object_type: 1 — вторичка, 2 — новостройки; сортировка по дате — без перекоса в продвигаемые объекты."""
     region, sub, _ = REGIONS[city]
     room_param = "room9=1" if rooms == 0 else f"room{min(rooms, 5)}=1"
     url = (f"https://{sub}.cian.ru/cat.php?deal_type=sale&engine_version=2&offer_type=flat"
-           f"&region={region}&{room_param}&object_type%5B0%5D=1&flat_share=2&sort=creation_date_desc&p={page}")
+           f"&region={region}&{room_param}&object_type%5B0%5D={2 if new else 1}&flat_share=2&sort=creation_date_desc&p={page}")
     if budget:
         url += f"&maxprice={int(budget * 1.05)}"
     if city == "Москва" and okrug in MOSCOW_OKRUGS:
@@ -148,12 +148,43 @@ def _address(geo: dict, city: str) -> str:
     return text.split(f"{city},")[-1].strip() or text
 
 
-def normalize(o: dict, city: str, today: date | None = None) -> dict | None:
+QUARTERS = {"first": 1, "second": 2, "third": 3, "fourth": 4, 1: 1, 2: 2, 3: 3, 4: 4}
+SALE_TYPES = {"fz214": "ДДУ (214-ФЗ)", "dupt": "договор уступки", "pdkp": "предварительный ДКП",
+              "dkp": "договор купли-продажи", "free": "свободная продажа", "alternative": "альтернатива"}
+
+
+def _deadline(o: dict) -> tuple[str | None, bool | None]:
+    """Срок сдачи новостройки: («4 кв. 2027», False) или («дом сдан», True). Поля Циана бывают в разных местах."""
+    nb = o.get("newbuilding") or {}
+    house = nb.get("house") or {}
+    dl = (o.get("building") or {}).get("deadline") or house.get("deadline") or nb.get("deadline") or {}
+    finished = house.get("isFinished") if house.get("isFinished") is not None else dl.get("isComplete")
+    if finished:
+        return "дом сдан", True
+    q, y = QUARTERS.get(dl.get("quarter") or dl.get("quarterEnd")), dl.get("year")
+    if y:
+        return (f"{q} кв. {y}" if q else f"{y} г."), False
+    return None, finished
+
+
+def _developer(o: dict) -> str | None:
+    nb = o.get("newbuilding") or {}
+    for v in (nb.get("newbuildingFeatures") or {}).get("builders") or [], nb.get("builders") or []:
+        if v and isinstance(v[0], dict) and v[0].get("name"):
+            return v[0]["name"]
+    user = o.get("user") or {}
+    if user.get("isBuilder") or user.get("isDeveloper"):
+        return user.get("companyName") or user.get("agencyName")
+    return None
+
+
+def normalize(o: dict, city: str, today: date | None = None, new: bool = False) -> dict | None:
+    """new=True — выдача новостроек: ДДУ (214-ФЗ) не отбрасываем, добавляем ЖК, срок сдачи, застройщика."""
     today = today or date.today()
     terms = o.get("bargainTerms") or {}
     price = terms.get("priceRur") or terms.get("price")
     area = _float(o.get("totalArea"))
-    if not price or not area or terms.get("saleType") == "fz214":
+    if not price or not area or (terms.get("saleType") == "fz214" and not new):
         return None
     if o.get("shareAmount") or o.get("category") == "flatShareSale":  # продажа доли, а не квартиры
         return None
@@ -209,6 +240,23 @@ def normalize(o: dict, city: str, today: date | None = None) -> dict | None:
         "is_apartments": bool(o.get("isApartments")),
         "is_auction": bool(o.get("isAuction")),
         "seller_role": "собственник" if o.get("isByHomeowner") else "агент продавца",
+        **(_new_fields(o, terms) if new else {"is_new": False}),
+    }
+
+
+def _new_fields(o: dict, terms: dict) -> dict:
+    nb = o.get("newbuilding") or {}
+    deadline, finished = _deadline(o)
+    developer = _developer(o)
+    from_developer = bool(developer) or bool((o.get("user") or {}).get("isBuilder")) or terms.get("saleType") == "fz214"
+    return {
+        "is_new": True,
+        "complex": nb.get("name") or None,          # ЖК
+        "deadline": deadline,                       # «4 кв. 2027» / «дом сдан»
+        "finished": finished,
+        "developer": developer,
+        "sale_type": SALE_TYPES.get(terms.get("saleType"), terms.get("saleType")),
+        "seller_role": "застройщик" if from_developer else "собственник (переуступка или вторичка в новом доме)",
     }
 
 
@@ -241,9 +289,13 @@ def _blocked(status: int, location: str) -> str | None:
     return None
 
 
-async def _fetch_page(city: str, rooms: int, budget: int | None, page: int, okrug: str | None = None) -> tuple[list[dict], str]:
+DUMP_RAW = False  # CLI --dump: сохранить сырые объявления страницы для проверки разбора
+
+
+async def _fetch_page(city: str, rooms: int, budget: int | None, page: int, okrug: str | None = None,
+                      new: bool = False) -> tuple[list[dict], str]:
     global _last_request
-    url = build_url(city, rooms, budget, page, okrug)
+    url = build_url(city, rooms, budget, page, okrug, new)
     async with _lock:
         attempts = [("httpx", _get_httpx)]
         try:
@@ -274,12 +326,17 @@ async def _fetch_page(city: str, rooms: int, budget: int | None, page: int, okru
     raw = extract_offers(text)
     if not raw and "offers" not in text:  # страница не та (вёрстка поменялась) — а не «ничего не нашлось»
         raise SourceUnavailable("не удалось разобрать страницу")
-    offers = [x for x in (normalize(o, city) for o in raw) if x]
+    if DUMP_RAW:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        dump = CACHE_DIR / f"raw_{REGIONS[city][0]}_{rooms}{'_new' if new else ''}_p{page}.json"
+        dump.write_text(json.dumps(raw, ensure_ascii=False, indent=1), encoding="utf-8")
+        log.warning("сырые объявления: %s", dump)
+    offers = [x for x in (normalize(o, city, new=new) for o in raw) if x]
     return offers, name
 
 
-def _snapshot_path(city: str, rooms: int, base: Path | None = None) -> Path:
-    return (base or CACHE_DIR) / f"{REGIONS[city][0]}_{rooms}.json"
+def _snapshot_path(city: str, rooms: int, base: Path | None = None, new: bool = False) -> Path:
+    return (base or CACHE_DIR) / f"{REGIONS[city][0]}_{rooms}{'_new' if new else ''}.json"
 
 
 def demo_mode() -> bool:
@@ -291,11 +348,11 @@ def _okrug_ok(x: dict, okrug: str | None) -> bool:
     return not okrug or x.get("okrug") == okrug
 
 
-def _save_snapshot(city: str, rooms: int, listings: list[dict]) -> None:
+def _save_snapshot(city: str, rooms: int, listings: list[dict], new: bool = False) -> None:
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        path = _snapshot_path(city, rooms)
-        old = load_snapshot(city, rooms, allow_demo=False)[0]
+        path = _snapshot_path(city, rooms, new=new)
+        old = load_snapshot(city, rooms, allow_demo=False, new=new)[0]
         merged = {x["id"]: x for x in old} | {x["id"]: x for x in listings}
         path.write_text(json.dumps({"version": SNAPSHOT_VERSION, "fetched_at": datetime.now().isoformat(timespec="minutes"),
                                     "listings": list(merged.values())}, ensure_ascii=False), encoding="utf-8")
@@ -303,10 +360,10 @@ def _save_snapshot(city: str, rooms: int, listings: list[dict]) -> None:
         log.warning("не удалось сохранить срез Циана: %s", exc)
 
 
-def load_snapshot(city: str, rooms: int, allow_demo: bool = True) -> tuple[list[dict], str | None]:
+def load_snapshot(city: str, rooms: int, allow_demo: bool = True, new: bool = False) -> tuple[list[dict], str | None]:
     """Сохранённый срез: локальный кеш, а если его нет (или включён демо-режим) — демо-срез из репозитория."""
-    path = _snapshot_path(city, rooms)
-    demo = _snapshot_path(city, rooms, DEMO_DIR)
+    path = _snapshot_path(city, rooms, new=new)
+    demo = _snapshot_path(city, rooms, DEMO_DIR, new=new)
     if allow_demo and (demo_mode() or not path.exists()):
         path = demo
     if not path.exists():
@@ -317,45 +374,47 @@ def load_snapshot(city: str, rooms: int, allow_demo: bool = True) -> tuple[list[
     return data["listings"], data.get("fetched_at")
 
 
-async def search(city: str, rooms: int, budget: int | None, page: int = 1, okrug: str | None = None) -> tuple[list[dict], dict]:
+async def search(city: str, rooms: int, budget: int | None, page: int = 1, okrug: str | None = None,
+                 new: bool = False) -> tuple[list[dict], dict]:
     """Возвращает (объявления, отчёт). Отчёт: status live | cached | snapshot | unavailable."""
     if not supported(city):
         raise SourceUnavailable(f"для города «{city}» площадка не подключена")
     if demo_mode():  # без сети: только демо-срез, одна «страница»
         if page > 1:
             raise SourceUnavailable("демо-режим: больше страниц нет")
-        saved, fetched_at = load_snapshot(city, rooms)
+        saved, fetched_at = load_snapshot(city, rooms, new=new)
         saved = [x for x in saved if (not budget or x["price"] <= budget * 1.05) and _okrug_ok(x, okrug)]
         if not saved:
-            raise SourceUnavailable(f"демо-режим: нет сохранённых объявлений для «{city}», {rooms}-комн.")
+            raise SourceUnavailable(f"демо-режим: нет сохранённых объявлений для «{city}», {rooms}-комн."
+                                    + (" (новостройки)" if new else ""))
         return saved, {"status": "demo", "note": f"демо-режим: сохранённый срез Циана от {fetched_at}"}
-    key = (city, rooms, budget, page, okrug)
+    key = (city, rooms, budget, page, okrug, new)
     hit = _memory.get(key)
     if hit and time.time() - hit[0] < CACHE_TTL:
         return hit[1], {"status": "cached", "note": "из кеша сессии"}
     try:
-        listings, via = await _fetch_page(city, rooms, budget, page, okrug)
+        listings, via = await _fetch_page(city, rooms, budget, page, okrug, new)
         _memory[key] = (time.time(), listings)
-        _save_snapshot(city, rooms, listings)
+        _save_snapshot(city, rooms, listings, new)
         note = f"страница {page}" + (" (запасной путь curl_cffi после капчи)" if via == "curl_cffi" else "")
         return listings, {"status": "live", "note": note, "via": via}
     except SourceUnavailable as exc:
         log.warning("Циан недоступен: %s", exc)
         if page > 1:
             raise
-        saved, fetched_at = load_snapshot(city, rooms)
+        saved, fetched_at = load_snapshot(city, rooms, new=new)
         saved = [x for x in saved if (not budget or x["price"] <= budget * 1.05) and _okrug_ok(x, okrug)]
         if saved:
             return saved, {"status": "snapshot", "note": f"{exc}; сохранённый срез от {fetched_at}"}
         raise
 
 
-async def market(city: str, rooms: int, okrug: str | None = None) -> dict | None:
+async def market(city: str, rooms: int, okrug: str | None = None, new: bool = False) -> dict | None:
     """Сколько стоят такие квартиры: квартили цены по свежим объявлениям (без фильтра по бюджету)."""
     import statistics
 
     try:
-        items, rep = await search(city, rooms, None, 1, okrug)
+        items, rep = await search(city, rooms, None, 1, okrug, new)
     except SourceUnavailable:
         return None
     items = drop_outliers(items)
@@ -387,14 +446,20 @@ if __name__ == "__main__":  # прогрев среза
     ap.add_argument("--budget", type=int, default=9_000_000)
     ap.add_argument("--pages", type=int, default=2)
     ap.add_argument("--okrug", default=None, help="для Москвы: ЮЗАО, ЦАО, …")
+    ap.add_argument("--new", action="store_true", help="новостройки вместо вторички")
+    ap.add_argument("--dump", action="store_true", help="сохранить сырые объявления (для проверки разбора)")
     args = ap.parse_args()
+    DUMP_RAW = args.dump
 
     async def main():
         total = 0
         for p in range(1, args.pages + 1):
-            items, report = await search(args.city, args.rooms, args.budget, p, args.okrug)
+            items, report = await search(args.city, args.rooms, args.budget, p, args.okrug, args.new)
             total += len(items)
             print(f"страница {p}: {len(items)} объявлений ({report['status']})")
-        print(f"готово: {total}, срез — {_snapshot_path(args.city, args.rooms)}")
+            for x in items[:3]:
+                extra = f" · ЖК {x.get('complex')} · {x.get('deadline')} · {x.get('developer')}" if args.new else ""
+                print(f"   {x['price']:,} ₽ · {x['area']} м² · {x['address']}{extra}".replace(",", " "))
+        print(f"готово: {total}, срез — {_snapshot_path(args.city, args.rooms, new=args.new)}")
 
     asyncio.run(main())
