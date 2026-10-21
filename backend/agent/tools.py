@@ -185,7 +185,7 @@ def merge_profile(raw: dict, base: dict | None = None) -> dict:
         p["okrug"] = okrug_from_text(p["okrug"]) or (p["okrug"] if p["okrug"] in ("ЦАО", "САО", "СВАО", "ВАО", "ЮВАО", "ЮАО", "ЮЗАО", "ЗАО", "СЗАО") else None)
     if p.get("city") != "Москва":
         p["okrug"] = None
-    if p.get("housing") not in (None, "secondary", "new"):
+    if p.get("housing") not in (None, "secondary", "new", "both"):
         p["housing"] = None
     if p.get("payment") not in (None, "cash", "mortgage_ready", "mortgage_saving"):
         p["payment"] = None
@@ -258,7 +258,7 @@ def profile_summary(p: dict) -> str:
     if p["metro_max_minutes"]:
         extra.append(f"до метро до {p['metro_max_minutes']} мин")
     tail = (", " + ", ".join(extra)) if extra else ""
-    market = " в новостройке" if p.get("housing") == "new" else " на вторичном рынке"
+    market = {"new": " в новостройке", "both": " в новостройке или на вторичке"}.get(p.get("housing"), " на вторичном рынке")
     return f"Ищу {rooms}{market} в {where} до {fmt(p['budget_max'])}{tail}."
 
 
@@ -350,7 +350,11 @@ def listing_factor(x: dict) -> float:
 
 
 def fair_price(listing: dict, pool: list[dict]) -> dict:
-    """Медиана приведённой цены м² по аналогам из выдачи × поправки объекта × поправка на торг."""
+    """Медиана приведённой цены м² по аналогам из выдачи × поправки объекта × поправка на торг.
+    Новостройку сравниваем с новостройками, вторичку — со вторичкой (если аналогов хватает)."""
+    market = [x for x in pool if bool(x.get("is_new")) == bool(listing.get("is_new"))]
+    if len(market) >= 4:
+        pool = market
     same = [x for x in pool if x["id"] != listing["id"] and x["rooms"] == listing["rooms"]
             and 0.7 <= x["area"] / listing["area"] <= 1.4]
     near = []
@@ -415,6 +419,8 @@ def bargaining_arguments(listing: dict, fp: dict) -> list[str]:
         args.append(f"состояние: {listing['condition']} — покупателю нужны вложения в ремонт")
     if listing.get("year") and listing["year"] < 1990:
         args.append(f"дом {listing['year']} года")
+    if listing.get("is_new"):
+        args.append("уточню скидку застройщика при ипотеке или полной оплате — у застройщиков это частая практика")
     args.append("покупатель с одобренной ипотекой Сбера, деньги через сервис безопасных расчётов, выход на сделку за 2–3 недели")
     return args
 
@@ -479,7 +485,18 @@ MISSING_QUESTIONS = {
 ALWAYS_ASK = [("owners", "собственники", "сколько собственников и как давно квартира в собственности")]
 
 
+NEW_BUILD_QUESTIONS = [
+    ("deadline", "срок сдачи", "когда сдача дома и выдача ключей, были ли переносы"),
+    ("condition", "отделка", "какая отделка — черновая, предчистовая или чистовая"),
+    ("contract", "договор и эскроу", "по какому договору продаёте — ДДУ с эскроу, и есть ли скидка при ипотеке"),
+]
+
+
 def missing_info(listing: dict, limit: int = 3) -> list[dict]:
+    if listing.get("is_new"):
+        qs = [{"key": k, "label": lab, "question": q} for k, lab, q in NEW_BUILD_QUESTIONS
+              if k == "contract" or listing.get(k) is None]
+        return qs[:limit]
     out = [{"key": k, "label": lab, "question": q} for k, (lab, q) in MISSING_QUESTIONS.items() if listing.get(k) is None]
     out += [{"key": k, "label": lab, "question": q} for k, lab, q in ALWAYS_ASK]
     return out[:limit]
@@ -489,25 +506,9 @@ def missing_info(listing: dict, limit: int = 3) -> list[dict]:
 
 
 def legal_check(listing: dict) -> dict:
-    """Что можно сказать по данным объявления. Выписки ЕГРН/ФССП в прототипе не запрашиваем."""
-    checks = []
-
-    def add(source, title, status, note):
-        checks.append({"source": source, "title": title, "status": status, "note": note})
-
-    rr = listing.get("rosreestr_checked")
-    add(listing.get("source_name", "Площадка"), "Проверка площадкой",
-        "ok" if rr else "info", "собственник проверен в Росреестре" if rr else "площадка собственника не проверяла")
-    if listing.get("is_apartments"):
-        add("Объявление", "Апартаменты", "warn", "не жильё: нельзя прописаться, ипотека сложнее")
-    if listing.get("is_auction"):
-        add("Объявление", "Продажа с торгов", "warn", "особый порядок сделки — нужен юрист")
-    for note in description_flags(listing.get("description")):
-        add("Описание", "Обратить внимание", "warn", note)
-    add("ЕГРН, ФССП, ЕФРСБ", "Выписки по объекту и продавцу", "pending",
-        "запросим после выбора объекта (в прототипе не подключено)")
-    status = "warn" if any(c["status"] == "warn" for c in checks) else "ok"
-    return {"listing_id": listing["id"], "status": status, "checks": checks}
+    """Досье безопасности: что видно по объявлению и какие проверки по реестрам нужны до сделки (security.py)."""
+    from .security import dossier
+    return dossier(listing)
 
 
 # ---------------------------------------------------------------- просмотр и сделка
@@ -536,6 +537,16 @@ def viewing_checklist(listing: dict) -> list[str]:
         "Сверить планировку с техпланом",
         "Узнать, кто прописан и когда выпишутся",
     ]
+    if listing.get("is_new"):
+        items = [
+            "Сверить квартиру с планировкой из ДДУ: площадь, окна, высота потолков",
+            "Посмотреть шоурум или готовые квартиры застройщика — качество отделки",
+            "Проверить двор, парковку, школу и сад рядом — что уже построено, а что в планах",
+            "Уточнить, как будут принимать квартиру: акт осмотра и устранение недостатков",
+        ]
+        if not listing.get("finished"):
+            items.insert(0, "Посмотреть стройку: идут ли работы, совпадает ли этаж с графиком")
+        return items
     if listing.get("condition") in (None, "требует ремонта", "без отделки"):
         items.insert(1, "Оценить объём ремонта — от него зависит итоговая цена")
     if listing.get("floor") == 1:
@@ -569,6 +580,22 @@ def deal_plan(listing: dict, final_price: int, down_payment: int | None, today: 
     program = program or "Рыночная ипотека Сбера"
     pay = annuity(loan, rate, years)
     pay_before = annuity(max(0, listing["price"] - down_payment), rate, years)
+    if listing.get("is_new"):
+        steps = [
+            (0, "Цена согласована с застройщиком", "Итог звонка и запись разговора — в журнале сделки"),
+            (1, "Проверка застройщика и дома", "ЕИСЖС: разрешение, проектная декларация, эскроу, сроки"),
+            (2, "Заявка на ипотеку по объекту", f"{program}: кредит {fmt(loan)} на {years} лет под {rate * 100:.1f}%".replace(".", ",")),
+            (5, "Страхование", "Жизнь заёмщика — СберСтрахование; имущество — после сдачи дома"),
+            (7, "Подписание ДДУ", "Электронная подпись, договор участия в долевом строительстве"),
+            (7, "Эскроу-счёт", "Деньги лежат в банке до сдачи дома, застройщик получит их после ввода"),
+            (14, "Регистрация ДДУ", "Росреестр электронно — без визитов"),
+        ]
+        return {
+            "cash": False, "new": True, "loan": loan, "down_payment": down_payment, "years": years, "rate": rate,
+            "program": program, "monthly": int(round(pay, -2)), "monthly_saved": int(round(pay_before - pay, -1)),
+            "costs": {"Страхование жизни, 1-й год": int(round(loan * 0.004, -2)), "Электронная регистрация ДДУ": 2_000},
+            "timeline": [{"date": (today + timedelta(days=d)).isoformat(), "title": t, "note": n} for d, t, n in steps],
+        }
     steps = [
         (0, "Цена согласована", "Итог звонка и запись разговора — в журнале сделки"),
         (1, "Заявка на ипотеку по объекту", f"{program}: кредит {fmt(loan)} на {years} лет под {rate * 100:.1f}%".replace(".", ",")),

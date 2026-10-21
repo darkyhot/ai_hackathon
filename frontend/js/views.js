@@ -55,7 +55,7 @@ export function profile(p) {
       <div><dt>Город</dt><dd>${p.city}${p.okrug ? `, ${p.okrug}` : ""}</dd></div>
       <div><dt>Комнат</dt><dd>${rooms}</dd></div>
       <div><dt>Бюджет до</dt><dd class="num">${rub(p.budget_max)}${html.raw(p.budget_source ? html`<small class="dd-note">${p.budget_source}</small>` : "")}</dd></div>
-      <div><dt>Рынок</dt><dd>вторичный${p.housing === "new" ? html.raw(html`<small class="dd-note">новостройки пока не подключены</small>`) : ""}</dd></div>
+      <div><dt>Рынок</dt><dd>${{ new: "новостройки", both: "новостройки и вторичка" }[p.housing] || "вторичный"}</dd></div>
       <div><dt>Районы</dt><dd>${p.districts?.length ? p.districts.join(", ") : "любые"}</dd></div>
       <div><dt>Школа рядом</dt><dd>${p.near_school ? "важно" : "не важно"}</dd></div>
       <div><dt>Кухня</dt><dd>${p.kitchen_min ? `от ${p.kitchen_min} м²` : "любая"}</dd></div>
@@ -250,6 +250,8 @@ function offerCard(c, vote) {
   const floor = c.floor ? `${c.floor}${c.floors ? `/${c.floors}` : ""} эт.` : "";
   const meta = [c.district, c.address, metroText(c.metro)].filter(Boolean).join(" · ");
   const params = [c.kitchen ? `кухня ${c.kitchen} м²` : null, c.year ? `${c.year} г.` : null, c.condition, c.material].filter(Boolean).join(" · ");
+  const isNew = c.is_new ? html`<p class="offer-new"><span class="tag tag-blue">Новостройка</span> ${[c.complex ? `ЖК ${c.complex}` : null, c.deadline ? `сдача: ${c.deadline}` : null, c.developer].filter(Boolean).join(" · ")}</p>` : "";
+  const pay = c.pay ? html`<p class="offer-pay ${c.pay.program === "семейная" ? "is-family" : ""}"><b class="num">≈ ${rub(c.pay.monthly)}/мес</b> ${c.pay.program} ${pct(c.pay.rate)}${c.pay.hint ? ` · ${c.pay.hint}` : ""}</p>` : "";
   return html`
   <article class="offer ${vote === "up" ? "is-liked" : vote === "down" ? "is-disliked" : ""}" data-id="${c.id}">
     <a class="offer-photo" ${c.url ? html.raw(html`href="${c.url}" target="_blank" rel="noopener noreferrer"`) : ""} aria-label="Открыть объявление на площадке">
@@ -258,7 +260,9 @@ function offerCard(c, vote) {
     </a>
     <div class="offer-body">
       <div class="offer-price"><span class="num">${rub(c.price)}</span> ${html.raw(priceTag(c))}</div>
+      ${html.raw(pay)}
       <h3>${rooms}, ${c.area} м²${floor ? `, ${floor}` : ""}</h3>
+      ${html.raw(isNew)}
       <p class="meta">${meta}</p>
       ${html.raw(params ? html`<p class="meta">${params}</p>` : "")}
       ${html.raw(c.missing?.length ? html`<p class="missing">Нет в объявлении: ${c.missing.join(", ")} — уточню по телефону</p>` : "")}
@@ -291,24 +295,52 @@ export function selection(d, marks) {
 
 // ------------------------------------------------------------------ проверка, просмотр, сделка, итог
 
+const CHECK_ICON = { ok: "ic-ok", warn: "ic-warn", info: "ic-info" };
+const DEAL_STATUS = { not_checked: ["st-none", "не проверено"], partial: ["st-part", "частично"], done: ["st-done", "проверено"] };
+
 export function legal(d) {
   const byId = Object.fromEntries(d.listings.map((l) => [l.id, l]));
-  const tags = { ok: ["tag-green", "по объявлению чисто"], warn: ["tag-amber", "есть оговорки"] };
   const cards = d.checks.map((c) => {
-    const [cls, label] = tags[c.status] || tags.ok;
+    const l = byId[c.listing_id];
+    const tag = c.status === "warn" ? html`<span class="tag tag-amber">есть оговорки</span>` : html`<span class="tag tag-green">по объявлению без тревог</span>`;
+    const listingRows = c.checks.map((k) => html`<li><span class="ic ${CHECK_ICON[k.status] || "ic-info"}"></span><span><b>${k.title}:</b> ${k.note}</span></li>`).join("");
+    const dealRows = c.before_deal.map((k) => {
+      const [cls, label] = DEAL_STATUS[k.status] || DEAL_STATUS.not_checked;
+      return html`
+        <li class="${k.priority ? "is-priority" : ""}">
+          <div class="sec-main"><b>${k.title}</b><span class="sec-src">${k.source}</span></div>
+          <p class="sec-shows">${k.shows}</p>
+          ${html.raw(k.priority ? html`<p class="sec-why">Важно здесь: ${k.why}</p>` : "")}
+          ${html.raw(k.note ? html`<p class="sec-shows">${k.note}</p>` : "")}
+          <span class="sec-status ${cls}">${label}</span>
+        </li>`;
+    }).join("");
+    const pct = c.total ? Math.round((c.done / c.total) * 100) : 0;
     return html`
-      <article class="legal">
-        <header><h3>${byId[c.listing_id].address}</h3><span class="tag ${cls}">${label}</span></header>
-        <ul class="checks">
-          ${html.raw(c.checks.map((k) => html`<li><span class="ic ic-${k.status}"></span><span class="src">${k.source}</span><span><b>${k.title}:</b> ${k.note}</span></li>`).join(""))}
-        </ul>
+      <article class="security">
+        <header>
+          <div><h3>${l.address}</h3><p class="hint" style="margin:2px 0 0">${l.is_new ? `Новостройка${l.complex ? ` · ЖК ${l.complex}` : ""}` : "Вторичка"} · ${rub(l.price)}</p></div>
+          ${html.raw(tag)}
+        </header>
+        <div class="sec-cols">
+          <div>
+            <h4 class="sec-h">По объявлению</h4>
+            <ul class="checks">${html.raw(listingRows)}</ul>
+          </div>
+          <div>
+            <div class="sec-progress"><h4 class="sec-h">До сделки по реестрам</h4><span class="num">${c.done} из ${c.total}</span></div>
+            <div class="sec-bar" role="img" aria-label="Проверено ${c.done} из ${c.total}"><span style="width:${pct}%"></span></div>
+            <ul class="sec-list">${html.raw(dealRows)}</ul>
+          </div>
+        </div>
       </article>`;
   });
   return html`
   <section class="panel">
-    <h2 class="panel-title">Проверка рисков</h2>
-    <p class="panel-lead">По данным объявления: проверка площадкой, апартаменты, торги и тревожные слова в описании (доли, наследство, перепланировка). Выписки ЕГРН, ФССП и реестра банкротств агент закажет после выбора квартиры.</p>
-    <div class="legal-grid">${html.raw(cards.join(""))}</div>
+    <h2 class="panel-title">Проверка безопасности</h2>
+    <p class="panel-lead">Что видно по объявлению — проверено. Реестры агент закажет после выбора квартиры, до задатка; пока выписок нет, он не пишет «чисто». Пункты с пометкой «важно здесь» — то, на что указывает само объявление.</p>
+    <div class="security-list">${html.raw(cards.join(""))}</div>
+    <p class="hint">В прототипе реестры не подключены. В продукте Домклик запросит выписку ЕГРН, ФССП, ЕФРСБ и ЕИСЖС автоматически, а нетиповые случаи передаст юристу.</p>
   </section>`;
 }
 
