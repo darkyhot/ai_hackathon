@@ -20,7 +20,7 @@ from . import finance as F
 from . import mortgage as M
 from . import negotiation as N
 from . import preferences as P
-from . import prompts, seller_sim
+from . import prompts, qa, seller_sim
 from . import tools as T
 
 log = logging.getLogger(__name__)
@@ -44,6 +44,9 @@ class Session:
     notes: list[str] = field(default_factory=list)
     finance: dict | None = None
     mortgage: dict | None = None   # ипотечные программы: что подходит и по какой ставке считаем
+    stage: str | None = None       # текущий шаг — для ответов на вопросы
+    shown: list = field(default_factory=list)   # последняя подборка (карточки со справедливой ценой)
+    current: dict | None = None    # объект, по которому идёт звонок: {"listing", "fair"}
     opened: dict[str, int] = field(default_factory=dict)
     journal: dict = field(default_factory=dict)
     llm_degraded: bool = False
@@ -53,6 +56,8 @@ class Session:
         await self.events.put({"type": type_, **payload})
 
     async def step(self, n: int, status: str) -> None:
+        if status == "active":
+            self.stage = STEPS[n - 1]
         await self.emit("step", step=n, title=STEPS[n - 1], status=status)
 
     async def say(self, text: str) -> None:
@@ -76,10 +81,13 @@ class Session:
         return True
 
     async def receive_text(self, text: str, marks: dict | None = None) -> str:
-        """Текст клиента: ответ на вопрос, пожелание к подборке или заметка на потом."""
+        """Текст клиента: ответ на уточнение, вопрос агенту, пожелание к подборке или заметка на потом."""
         await self.emit("message", role="user", text=text)
         if self.resolve("clarify", True, {"text": text}):
             return "answer"
+        if qa.is_question(text):  # «что такое СБР?» — отвечаем, текущий шаг ждёт дальше
+            asyncio.create_task(qa.answer(self, text))
+            return "question"
         marks = marks or {}
         if self.resolve("selection", True, {"action": "more", "note": text,
                                             "liked": marks.get("liked", []), "disliked": marks.get("disliked", [])}):
@@ -405,8 +413,9 @@ async def pipeline(s: Session) -> None:
                  and x.get("district") not in s.prefs.districts_minus]
         batch = liked + fresh[:BATCH]
         shown |= {x["id"] for x in batch}
+        s.shown = [card(x, meta) for x in batch]
         await s.emit("result", step=4, kind="selection", data={
-            "round": round_no, "cards": [card(x, meta) for x in batch], "liked": s.prefs.liked,
+            "round": round_no, "cards": s.shown, "liked": s.prefs.liked,
             "disliked": s.prefs.disliked, "learned": s.prefs.learned(), "remaining": len(fresh) - BATCH,
         })
         if round_no == 1:
@@ -443,6 +452,7 @@ async def pipeline(s: Session) -> None:
     # 6–9 по кандидатам (если цена не устроила — следующий)
     for listing in candidates[:3]:
         fp = meta[listing["id"]]["fair"]
+        s.current = {"listing": listing, "fair": fp}
         authority = min(profile["budget_max"], listing["price"], fp["high"])
         seller = seller_sim.build(listing)
         questions = T.missing_info(listing)

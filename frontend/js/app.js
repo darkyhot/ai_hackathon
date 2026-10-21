@@ -346,7 +346,7 @@ function finish(status) {
 
 function setComposer() {
   $("sendBtn").textContent = state.running ? "Отправить" : "Поручить агенту";
-  $("query").placeholder = state.running ? "Ответ агенту или пожелание: «кухня побольше», «не первый этаж»…" : "Например: ищу 2-комнатную в Казани до 9 млн рядом со школой";
+  $("query").placeholder = state.running ? "Ответ, пожелание или вопрос: «кухня побольше», «что такое СБР?»…" : "Например: ищу 2-комнатную в Казани до 9 млн рядом со школой";
   $("resetBtn").hidden = !state.sid;
 }
 
@@ -393,7 +393,8 @@ async function sendText(text) {
   $("query").value = "";
   const marks = { liked: [...state.marks.liked], disliked: [...state.marks.disliked] };
   try {
-    await api.message(state.sid, text, marks);
+    const r = await api.message(state.sid, text, marks);
+    if (r?.handled_as === "question") return; // вопрос агенту: текущий шаг (подборка, подтверждение) ждёт дальше
     if (state.awaiting === "clarify") {
       chatLog.querySelectorAll(".confirm-clarify:not(.is-done)").forEach((c) => c.classList.add("is-done"));
     }
@@ -523,6 +524,10 @@ api.health().then((h) => {
   cities = h.cities || [];
   recorder.available = Boolean(h.stt?.installed && h.stt.status !== "error");
   setProvider(h);
+  if (h.demo) {
+    const badge = el(html`<span class="provider is-offline" title="Объявления — из сохранённого среза Циана, без сети">Демо-режим</span>`);
+    $("provider").before(badge);
+  }
   if (state.view === 0) renderStage();
 })
   .catch(() => setProvider({ provider: "offline", reason: "сервер недоступен" }));
