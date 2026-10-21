@@ -83,7 +83,8 @@ class CianNewBuildTest(unittest.TestCase):
     def test_collect_both_markets_labels_sources(self):
         async def fake(city, rooms, budget, page=1, okrug=None, new=False):
             return [new_flat() if new else flat()], {"status": "demo", "note": "тест"}
-        with mock.patch.object(cian, "search", side_effect=fake):
+        with mock.patch.object(cian, "search", side_effect=fake), \
+             mock.patch.object(sources, "enabled", return_value=[cian]):
             items, report = asyncio.run(sources.collect({"city": "Казань", "rooms": 2, "budget_max": 9_000_000, "housing": "both"}))
         self.assertEqual({x["is_new"] for x in items}, {False, True})
         self.assertEqual([r["source"] for r in report], ["Циан · вторичка", "Циан · новостройки"])

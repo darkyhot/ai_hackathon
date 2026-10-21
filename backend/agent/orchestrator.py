@@ -370,14 +370,17 @@ async def pipeline(s: Session) -> None:
     for attempt in range(4):
         where = profile["city"] + (f", {profile['okrug']}" if profile.get("okrug") else "")
         market_txt = {"new": "новостройки", "both": "новостройки и вторичка"}.get(profile.get("housing"), "вторичный рынок")
-        await s.say(f"Ищу на Циане: {where}, {T.rooms_text(profile['rooms'])}, {market_txt}, до {T.fmt(profile['budget_max'])}.")
+        on = " и ".join(sources.names(profile["city"])) or "площадках"
+        on = on.replace("Циан", "Циане").replace("Домклик", "Домклике")
+        await s.say(f"Ищу на {on}: {where}, {T.rooms_text(profile['rooms'])}, {market_txt}, до {T.fmt(profile['budget_max'])}.")
         listings, report = await sources.collect(profile)
         pool = [x for x in listings if T.passes_hard_filters(x, profile)]
         if pool:
             break
         await s.emit("result", step=3, kind="search", data={"report": report, "total": len(listings), "matched": 0, "rows": []})
-        if report and report[0]["status"] == "unavailable":
-            await s.say(f"Циан сейчас не отдаёт объявления ({report[0]['note']}). Попробуйте чуть позже.")
+        if report and all(r["status"] == "unavailable" for r in report):
+            await s.say("Площадки сейчас не отдают объявления (" + "; ".join(f"{r['source']}: {r['note']}" for r in report)
+                        + "). Попробуйте чуть позже.")
             await s.emit("done", status="empty")
             return
         m = await sources.market(profile)
@@ -411,7 +414,14 @@ async def pipeline(s: Session) -> None:
     rows = [{"id": x["id"], "address": x["address"], "district": x.get("district"), "area": x["area"],
              "price": x["price"], **meta[x["id"]]["fair"]} for x in order[:8]]
     await s.emit("result", step=3, kind="search", data={"report": report, "total": len(listings), "matched": len(pool), "rows": rows})
-    src = ", ".join(f"{r['source']} — {r['count']}" + (" (сохранённый срез)" if r["status"] == "snapshot" else "") for r in report)
+    src = ", ".join(f"{r['source']} — {r['count']}" + (" (сохранённый срез)" if r["status"] == "snapshot" else "")
+                    for r in report if r["status"] != "unavailable")
+    down = [r["source"] for r in report if r["status"] == "unavailable"]
+    if down:
+        src += f" ({', '.join(down)} сейчас не отвечает)"
+    dups = sources.dedup.duplicates_count(listings)
+    if dups:
+        src += f"; одинаковых квартир на разных площадках — {dups}, склеил их в одну карточку"
     over = sum(1 for x in pool if meta[x["id"]]["fair"]["overprice_pct"] > 1)
     await s.say(f"Нашёл объявлений: {src}. Под ваши параметры подходят {len(pool)}; "
                 f"{over} из них дороже справедливой цены — там есть что сторговать.")

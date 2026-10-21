@@ -240,6 +240,8 @@ button, input, textarea { font: inherit; color: inherit; }
 .tag-amber { background: var(--amber-soft); color: var(--amber); }
 .tag-blue { background: color-mix(in srgb, var(--blue) 14%, transparent); color: var(--blue); }
 .offer-new { margin: 2px 0 4px; font-size: 13px; color: var(--ink-2); }
+.offer-where { margin: 2px 0 4px; font-size: 13px; color: var(--green-strong); font-weight: 500; }
+.offer-where a { color: inherit; }
 .offer-pay { margin: 6px 0 4px; font-size: 13px; color: var(--ink-2); }
 .offer-pay b { font-size: 14px; color: var(--ink); }
 .offer-pay.is-family b { color: var(--green-strong); }

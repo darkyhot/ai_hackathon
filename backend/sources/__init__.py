@@ -1,16 +1,34 @@
 """Источники объявлений. Агент вызывает collect() и не знает деталей площадок.
 
-Сейчас подключён Циан: живой запрос -> кеш сессии -> сохранённый срез
-(тоже реальные объявления Циана). Синтетики нет: если данных нет, агент так и говорит.
+Подключены Циан и Домклик (список — переменная SOURCES в .env, по умолчанию «cian,domclick»).
+Площадки опрашиваются параллельно; одна и та же квартира с разных сайтов склеивается
+в одну карточку со списком площадок и цен (dedup.py). У каждой площадки свой путь отката:
+живой запрос -> кеш сессии -> сохранённый срез (тоже реальные объявления).
+Синтетики нет: если данных нет, агент так и говорит.
 """
 from __future__ import annotations
 
-from . import cian
+import asyncio
+
+from . import cian, dedup, domclick
 from .base import SourceUnavailable, description_flags, normalize_city
 
-__all__ = ["collect", "markets", "more", "comparables", "market", "normalize_city", "description_flags", "SourceUnavailable", "cian", "SUPPORTED_CITIES"]
+__all__ = ["collect", "markets", "more", "comparables", "market", "enabled", "names", "normalize_city",
+           "description_flags", "SourceUnavailable", "cian", "domclick", "dedup", "SUPPORTED_CITIES"]
 
+REGISTRY = {"cian": cian, "domclick": domclick}
 SUPPORTED_CITIES = list(cian.REGIONS)
+
+
+def enabled(city: str | None = None) -> list:
+    """Включённые площадки (SOURCES в .env), которые знают этот город."""
+    from ..config import settings
+    keys = [k.strip() for k in settings.sources.split(",") if k.strip() in REGISTRY] or ["cian"]
+    return [REGISTRY[k] for k in keys if city is None or REGISTRY[k].supported(city)]
+
+
+def names(city: str | None = None) -> list[str]:
+    return [s.SOURCE_NAME for s in enabled(city)]
 
 
 def markets(profile: dict) -> list[bool]:
@@ -19,23 +37,30 @@ def markets(profile: dict) -> list[bool]:
     return [True] if h == "new" else [False, True] if h == "both" else [False]
 
 
+def _label(src, new: bool, profile: dict) -> str:
+    return src.SOURCE_NAME + (" · новостройки" if new else " · вторичка" if profile.get("housing") == "both" else "")
+
+
 async def collect(profile: dict) -> tuple[list[dict], list[dict]]:
-    """Возвращает (объявления, отчёт по площадкам) — по вторичке и/или новостройкам."""
-    items_all, report = [], []
-    for new in markets(profile):
-        label = cian.SOURCE_NAME + (" · новостройки" if new else " · вторичка" if profile.get("housing") == "both" else "")
+    """Возвращает (объявления, отчёт по площадкам): все площадки × вторичка/новостройки, дубли склеены."""
+    jobs = [(src, new) for src in enabled(profile.get("city")) for new in markets(profile)]
+
+    async def one(src, new):
         try:
-            items, rep = await cian.search(profile.get("city"), profile["rooms"], profile["budget_max"], 1, profile.get("okrug"), new)
+            items, rep = await src.search(profile.get("city"), profile["rooms"], profile["budget_max"], 1,
+                                          profile.get("okrug"), new)
             items = cian.drop_outliers(items)
-            items_all += items
-            report.append({"source": label, "count": len(items), **rep})
+            return items, {"source": _label(src, new, profile), "count": len(items), **rep}
         except SourceUnavailable as exc:
-            report.append({"source": label, "count": 0, "status": "unavailable", "note": str(exc)})
-    return items_all, report
+            return [], {"source": _label(src, new, profile), "count": 0, "status": "unavailable", "note": str(exc)}
+
+    results = await asyncio.gather(*(one(s, n) for s, n in jobs))
+    items_all = [x for items, _ in results for x in items]
+    return dedup.merge(items_all), [rep for _, rep in results]
 
 
 async def market(profile: dict) -> dict | None:
-    """Цены рынка по запросу (без бюджета) — чтобы клиенту было от чего оттолкнуться."""
+    """Цены рынка по запросу (без бюджета) — чтобы клиенту было от чего оттолкнуться (по Циану)."""
     if not cian.supported(profile.get("city")) or profile.get("rooms") is None:
         return None
     return await cian.market(profile["city"], profile["rooms"], profile.get("okrug"), profile.get("housing") == "new")
@@ -43,20 +68,21 @@ async def market(profile: dict) -> dict | None:
 
 def comparables(profile: dict) -> list[dict]:
     """Все сохранённые объявления того же города и комнатности — база для справедливой цены."""
-    if not cian.supported(profile.get("city")):
-        return []
     out = []
-    for new in markets(profile):
-        out += cian.load_snapshot(profile["city"], profile["rooms"], new=new)[0]
-    return out
+    for src in enabled(profile.get("city")):
+        for new in markets(profile):
+            out += src.load_snapshot(profile["city"], profile["rooms"], new=new)[0]
+    return dedup.merge(out)
 
 
 async def more(profile: dict, page: int) -> list[dict]:
-    """Следующая страница живой выдачи (если площадка отвечает)."""
+    """Следующая страница живой выдачи со всех площадок, которые отвечают."""
     out = []
-    for new in markets(profile):
-        try:
-            out += (await cian.search(profile.get("city"), profile["rooms"], profile["budget_max"], page, profile.get("okrug"), new))[0]
-        except SourceUnavailable:
-            pass
-    return out
+    for src in enabled(profile.get("city")):
+        for new in markets(profile):
+            try:
+                out += (await src.search(profile.get("city"), profile["rooms"], profile["budget_max"], page,
+                                         profile.get("okrug"), new))[0]
+            except SourceUnavailable:
+                pass
+    return dedup.merge(out)

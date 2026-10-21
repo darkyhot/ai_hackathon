@@ -201,7 +201,7 @@ function viewFor(n) {
   switch (n) {
     case 1: return r[1] ? V.profile(r[1]) : V.waiting("Разбираю запрос", "Город, бюджет, комнаты и ваши пожелания. Если чего-то не хватит — спрошу.");
     case 2: return r[2] ? V.finance(r[2], state.opened, state.strategy) : V.waiting("Финансы", "Ответьте в чате, как планируете покупать: наличными, в ипотеку или ещё копите на взнос.");
-    case 3: return r[3] ? V.search(r[3]) : V.waiting("Ищу объявления", "Запрашиваю Циан и считаю справедливую цену по похожим квартирам.");
+    case 3: return r[3] ? V.search(r[3]) : V.waiting("Ищу объявления", "Запрашиваю Циан и Домклик, склеиваю одинаковые квартиры и считаю справедливую цену по похожим.");
     case 4: return r[4] ? V.selection(r[4], state.marks) : V.waiting("Подбор", "Готовлю подборку.");
     case 5: return r[5] ? V.legal(r[5]) : V.waiting("Проверка", "Смотрю риски по данным объявления.");
     case 7: return r[7] ? V.viewing(r[7]) : V.waiting("Просмотр", "Договариваюсь о времени.");
@@ -526,7 +526,7 @@ api.health().then((h) => {
   recorder.available = Boolean(h.stt?.installed && h.stt.status !== "error");
   setProvider(h);
   if (h.demo) {
-    const badge = el(html`<span class="provider is-offline" title="Объявления — из сохранённого среза Циана, без сети">Демо-режим</span>`);
+    const badge = el(html`<span class="provider is-offline" title="Объявления — из сохранённого среза Циана и Домклика, без сети">Демо-режим</span>`);
     $("provider").before(badge);
   }
   if (state.view === 0) renderStage();

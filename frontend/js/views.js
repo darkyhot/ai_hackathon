@@ -20,7 +20,7 @@ export function welcome(cities = []) {
     <div class="examples">
       ${html.raw(EXAMPLES.map((e) => html`<button class="example" data-example="${e}">${e}</button>`).join(""))}
     </div>
-    <p class="hint">Объявления — с Циана${cities.length ? `: ${cities.join(", ")}` : ""}.</p>
+    <p class="hint">Объявления — с Циана и Домклика${cities.length ? `: ${cities.join(", ")}` : ""}. Одна и та же квартира с разных сайтов — одна карточка.</p>
   </section>`;
 }
 
@@ -251,18 +251,27 @@ function offerCard(c, vote) {
   const meta = [c.district, c.address, metroText(c.metro)].filter(Boolean).join(" · ");
   const params = [c.kitchen ? `кухня ${c.kitchen} м²` : null, c.year ? `${c.year} г.` : null, c.condition, c.material].filter(Boolean).join(" · ");
   const isNew = c.is_new ? html`<p class="offer-new"><span class="tag tag-blue">Новостройка</span> ${[c.complex ? `ЖК ${c.complex}` : null, c.deadline ? `сдача: ${c.deadline}` : null, c.developer].filter(Boolean).join(" · ")}</p>` : "";
+  const offers = c.offers || [];
+  let where = "";
+  if (offers.length > 1) {
+    const sorted = [...offers].sort((a, b) => a.price - b.price);
+    const diff = sorted[sorted.length - 1].price - sorted[0].price;
+    const links = offers.map((o) => (o.url ? html`<a href="${o.url}" target="_blank" rel="noopener noreferrer">${o.source_name}</a>` : o.source_name)).join(" и ");
+    where = html`<p class="offer-where">Есть на ${html.raw(links)}${diff > 0 ? ` · на ${sorted[0].source_name === "Циан" ? "Циане" : "Домклике"} дешевле на ${rub(diff)}` : " · цена одинаковая"}</p>`;
+  }
   const pay = c.pay ? html`<p class="offer-pay ${c.pay.program === "семейная" ? "is-family" : ""}"><b class="num">≈ ${rub(c.pay.monthly)}/мес</b> ${c.pay.program} ${pct(c.pay.rate)}${c.pay.hint ? ` · ${c.pay.hint}` : ""}</p>` : "";
   return html`
   <article class="offer ${vote === "up" ? "is-liked" : vote === "down" ? "is-disliked" : ""}" data-id="${c.id}">
     <a class="offer-photo" ${c.url ? html.raw(html`href="${c.url}" target="_blank" rel="noopener noreferrer"`) : ""} aria-label="Открыть объявление на площадке">
       ${html.raw(c.photo ? html`<img src="${c.photo}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : "")}
-      <span class="offer-src">${c.source_name}</span>
+      <span class="offer-src">${(c.sources || [c.source_name]).join(" · ")}</span>
     </a>
     <div class="offer-body">
       <div class="offer-price"><span class="num">${rub(c.price)}</span> ${html.raw(priceTag(c))}</div>
       ${html.raw(pay)}
       <h3>${rooms}, ${c.area} м²${floor ? `, ${floor}` : ""}</h3>
       ${html.raw(isNew)}
+      ${html.raw(where)}
       <p class="meta">${meta}</p>
       ${html.raw(params ? html`<p class="meta">${params}</p>` : "")}
       ${html.raw(c.missing?.length ? html`<p class="missing">Нет в объявлении: ${c.missing.join(", ")} — уточню по телефону</p>` : "")}
