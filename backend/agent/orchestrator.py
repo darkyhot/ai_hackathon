@@ -17,6 +17,7 @@ from typing import Any
 from .. import economics, sources
 from ..llm import LLMClient, LLMError
 from . import finance as F
+from . import mortgage as M
 from . import negotiation as N
 from . import preferences as P
 from . import prompts, seller_sim
@@ -42,6 +43,7 @@ class Session:
     prefs: P.Prefs = field(default_factory=P.Prefs)
     notes: list[str] = field(default_factory=list)
     finance: dict | None = None
+    mortgage: dict | None = None   # ипотечные программы: что подходит и по какой ставке считаем
     opened: dict[str, int] = field(default_factory=dict)
     journal: dict = field(default_factory=dict)
     llm_degraded: bool = False
@@ -169,6 +171,33 @@ async def ask_affordability(s: Session, profile: dict, market: dict | None) -> t
     return inputs, aff
 
 
+async def ask_family(s: Session, profile: dict) -> dict:
+    """Семья и маткапитал — от них зависит ставка. Спрашиваем один раз, с тем, что уже понял из запроса."""
+    known = M.normalize_family(profile)
+    if known["children"] == 0 or (known["children"] and known["youngest_age"] is not None and profile.get("matcap") is not None):
+        return known  # всё сказано в запросе — не переспрашиваем
+    r = await s.ask(
+        "family", "Семья и маткапитал",
+        "От этого зависит ставка: семейная ипотека — от 10% вместо рыночных ~17,5%, а маткапитал можно направить во взнос.",
+        defaults={"children": known["children"] if known["children"] is not None else 1,
+                  "youngest_age": known["youngest_age"] if known["youngest_age"] is not None else "",
+                  "matcap": known["matcap"] or (M.MATCAP_FIRST if profile.get("matcap") else 0),
+                  "matcap_default": M.MATCAP_FIRST},
+    )
+    if not r["approved"]:
+        return {"children": 0, "youngest_age": None, "matcap": 0}
+    return M.normalize_family(r["data"])
+
+
+async def choose_program(s: Session, profile: dict, price: int) -> dict:
+    family = await ask_family(s, profile)
+    profile.update(family)
+    progs = M.programs(price, profile["city"], family)
+    s.mortgage = progs
+    await s.say(progs["explanation"])
+    return progs
+
+
 # ------------------------------------------------------------- конвейер
 
 
@@ -251,14 +280,18 @@ async def pipeline(s: Session) -> None:
         payment = r["data"].get("payment", "mortgage_ready") if r["approved"] else "mortgage_ready"
     profile["payment"] = payment
     s.finance = None
+    progs = await choose_program(s, profile, budget) if payment != "cash" else None
+    chosen = next((c for c in progs["programs"] if c["key"] == progs["chosen"]), None) if progs else None
+    m_kw = ({"rate": progs["rate"] if progs["chosen"] != "market" else None,
+             "program": chosen["title"], "matcap": (progs["matcap"] or {}).get("amount", 0)} if progs else {})
     if payment == "cash":
         await s.emit("result", step=2, kind="finance", data={"mode": "cash", "price": budget})
         await s.say("Покупка без ипотеки: деньги уйдут продавцу через сервис безопасных расчётов только после регистрации права. "
                     "Пока ищем квартиру, сумму можно держать на накопительном счёте — по желанию.")
     elif payment == "mortgage_ready":
-        mortgage = T.mortgage_scenarios(budget, (fin_inputs or {}).get("monthly_income"))
+        mortgage = T.mortgage_scenarios(budget, (fin_inputs or {}).get("monthly_income"), **m_kw)
         rec = next(x for x in mortgage["scenarios"] if x["title"] == mortgage["recommended"])
-        await s.emit("result", step=2, kind="finance", data={"mode": "mortgage", "mortgage": mortgage})
+        await s.emit("result", step=2, kind="finance", data={"mode": "mortgage", "mortgage": mortgage, "programs": progs})
         await s.say(f"Ипотека: при взносе {T.fmt(rec['down_payment'])} и сроке {rec['years']} лет платёж около {T.fmt(rec['monthly'])} в месяц. "
                     f"Каждые 100 000 ₽, которые я сторгую, — минус {T.fmt(mortgage['per_100k_discount'])} в месяц.")
     else:  # ипотека, взнос ещё копим — тут и нужен финансовый помощник
@@ -270,10 +303,12 @@ async def pipeline(s: Session) -> None:
                 defaults=F.DEFAULT_INPUTS, price=budget,
             )
             fin_inputs = r["data"] if r["approved"] else {}
-            fin = F.plan(budget, fin_inputs)
+            fin = F.plan(budget, fin_inputs, matcap=m_kw.get("matcap", 0))
+        elif m_kw.get("matcap"):  # план считали до вопроса про маткапитал — пересчитаем с ним
+            fin = F.plan(budget, fin["inputs"], matcap=m_kw["matcap"])
         s.finance = fin
-        mortgage = T.mortgage_scenarios(budget, fin["inputs"]["monthly_income"], fin["available"])
-        await s.emit("result", step=2, kind="finance", data={"mode": "saving", "finance": fin, "mortgage": mortgage})
+        mortgage = T.mortgage_scenarios(budget, fin["inputs"]["monthly_income"], fin["available"], **m_kw)
+        await s.emit("result", step=2, kind="finance", data={"mode": "saving", "finance": fin, "mortgage": mortgage, "programs": progs})
         rec = ", ".join(f"{a['name'].lower()} — {T.fmt(a['amount_now'])}" for a in fin["allocation"] if a["amount_now"])
         await s.say(f"{fin['verdict']} Рекомендую разложить накопления: {rec}." + (f" {fin['risk_note']}" if fin["risk_note"] else ""))
         if fin["gap"] and not fin["fits_horizon"]:
@@ -478,7 +513,11 @@ async def pipeline(s: Session) -> None:
             down = None
         else:
             down = s.finance["down_payment"] if s.finance else int(profile["budget_max"] * 0.2)
-        plan = T.deal_plan(listing, price, down)
+        prog = s.mortgage or {}
+        prog_card = next((c for c in prog.get("programs", []) if c["key"] == prog.get("chosen")), None)
+        plan = T.deal_plan(listing, price, down,
+                           rate=prog.get("rate") if prog.get("chosen") != "market" else None,
+                           program=prog_card["title"] if prog_card else None)
         await s.emit("result", step=8, kind="deal", data=plan)
         if plan["cash"]:
             await s.say("Собрал план сделки без ипотеки: проверка продавца, договор с электронной подписью, "

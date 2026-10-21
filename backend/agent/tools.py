@@ -11,6 +11,7 @@ import statistics
 from datetime import date, timedelta
 
 from ..sources import description_flags, normalize_city
+from .mortgage import market_rate
 
 # ---------------------------------------------------------------- профиль запроса
 
@@ -29,6 +30,9 @@ EMPTY_PROFILE = {
     "kitchen_min": None,
     "area_min": None,
     "metro_max_minutes": None,
+    "children": None,         # сколько детей (0 — нет), для семейной ипотеки
+    "youngest_age": None,     # возраст младшего ребёнка, лет
+    "matcap": None,           # есть неизрасходованный маткапитал: True / сумма
     "wishes": [],
 }
 
@@ -108,7 +112,38 @@ def parse_request_rules(query: str) -> dict:
     metro = re.search(r"метро\D{0,15}(\d{1,2})\s*мин", q)
     if metro:
         p["metro_max_minutes"] = int(metro.group(1))
+    p.update(family_from_text(q))
     return p
+
+
+CHILD_WORDS = r"(?:ребен\w*|сын\w*|доч\w*|малыш\w*|дет\w*)"
+COUNT_WORDS = {"один": 1, "одного": 1, "двое": 2, "двоих": 2, "двух": 2, "трое": 3, "троих": 3, "трех": 3,
+               "четверо": 4, "четверых": 4, "пятеро": 5}
+
+
+def family_from_text(text: str | None) -> dict:
+    """Дети и маткапитал из текста: «у нас сын 4 года», «двое детей, младшей 2», «есть маткапитал»."""
+    q = (text or "").lower().replace("ё", "е")
+    out: dict = {}
+    if re.search(r"(?:нет|без)\s+детей|детей\s+нет|бездетн", q):
+        out["children"] = 0
+    else:
+        m = re.search(r"(\d|" + "|".join(COUNT_WORDS) + r")\s*(?:\w+\s+)?(?:детей|ребен\w*|дет\w*)", q)
+        if m:
+            w = m.group(1)
+            out["children"] = int(w) if w.isdigit() else COUNT_WORDS[w]
+        elif re.search(r"\b(?:ребен\w*|сын\w*|доч\w*|малыш\w*)", q):
+            out["children"] = 1
+        age = (re.search(CHILD_WORDS + r"\D{0,20}?(\d{1,2})\s*(?:год|лет|г\.|мес)", q)
+               or re.search(r"(\d{1,2})\s*(?:год|лет)\w*\s*" + CHILD_WORDS, q))
+        if age:
+            months = "мес" in q[age.end() - 4:age.end() + 2]
+            out["youngest_age"] = 0 if months else int(age.group(1))
+            out.setdefault("children", 1)
+    if re.search(r"маткапитал|материнск\w*\s+капитал", q) and not re.search(r"(?:нет|без|потратил\w*|использовал\w*)\s+(?:\w+\s+)?мат"
+                                                                                 r"|мат\w*\s+(?:\w+\s+)?(?:уже\s+)?(?:потрач|потрат|использ|нет)", q):
+        out["matcap"] = True
+    return out
 
 
 def merge_profile(raw: dict, base: dict | None = None) -> dict:
@@ -116,13 +151,15 @@ def merge_profile(raw: dict, base: dict | None = None) -> dict:
     p = dict(base or EMPTY_PROFILE)
     for key in EMPTY_PROFILE:
         v = raw.get(key)
-        if v in (None, "", [], False):  # «нет» в уточнении не отменяет сказанное раньше
+        keep_zero = key in ("children", "youngest_age", "rooms") and v == 0 and v is not False  # «детей нет», студия
+        if v in (None, "", [], False) and not keep_zero:  # «нет» в уточнении не отменяет сказанное раньше
             continue
         if key == "wishes" and p.get("wishes"):
             v = list(dict.fromkeys([*p["wishes"], *v]))
         p[key] = v
     p["city"] = normalize_city(p["city"]) or p["city"]
-    for key, cast in (("rooms", int), ("budget_max", int), ("kitchen_min", float), ("area_min", float), ("metro_max_minutes", int)):
+    for key, cast in (("rooms", int), ("budget_max", int), ("kitchen_min", float), ("area_min", float), ("metro_max_minutes", int),
+                      ("children", int), ("youngest_age", int)):
         try:
             p[key] = cast(p[key]) if p[key] is not None else None
         except (TypeError, ValueError):
@@ -210,7 +247,7 @@ def profile_summary(p: dict) -> str:
 
 # ---------------------------------------------------------------- ипотека
 
-DEMO_RATE = 0.169  # допущение; в проде — ставка из предодобрения Сбера
+DEMO_RATE = market_rate(0.2)  # рыночная ставка Сбера при взносе 20% (см. mortgage.py); в проде — из предодобрения
 
 
 def annuity(principal: float, annual_rate: float, years: int) -> float:
@@ -229,31 +266,37 @@ def deal_costs(price: int, loan: int) -> dict:
     }
 
 
-def mortgage_scenarios(price: int, monthly_income: int | None = None, down_available: int | None = None) -> dict:
+def mortgage_scenarios(price: int, monthly_income: int | None = None, down_available: int | None = None,
+                       rate: float | None = None, program: str | None = None, matcap: int = 0) -> dict:
+    """Три сценария ипотеки. rate=None — рыночная ставка Сбера (зависит от взноса);
+    иначе ставка выбранной программы. matcap — маткапитал, идёт во взнос."""
     costs = sum(deal_costs(price, int(price * 0.8)).values())
     variants = [("Взнос 20%, 30 лет", 0.20, 30), ("Взнос 20%, 20 лет", 0.20, 20), ("Взнос 30%, 25 лет", 0.30, 25)]
     rows = []
     for title, dp_share, years in variants:
         down = int(price * dp_share)
         loan = price - down
-        pay = annuity(loan, DEMO_RATE, years)
+        r = rate if rate is not None else market_rate(dp_share)
+        pay = annuity(loan, r, years)
         rows.append({
-            "title": title, "down_payment": down, "loan": loan, "years": years,
+            "title": title, "down_payment": down, "loan": loan, "years": years, "rate": r,
             "monthly": int(round(pay, -2)),
             "overpay": int(round(pay * years * 12 - loan, -3)),
             "income_needed": int(round(pay * 2, -3)),
             "fits_income": None if monthly_income is None else pay * 2 <= monthly_income,
-            "cash_needed": down + costs,
-            "savings_gap": 0 if down_available is None else max(0, down + costs - down_available),
+            "cash_needed": max(0, down - matcap) + costs,
+            "savings_gap": 0 if down_available is None else max(0, down - matcap + costs - down_available),
         })
     best = next((r for r in rows if r["fits_income"] is not False), rows[0])
     return {
-        "rate": DEMO_RATE,
+        "rate": best["rate"],
+        "program": program or "Рыночная ипотека Сбера",
+        "matcap": matcap,
         "deal_costs": costs,
         "scenarios": rows,
         "recommended": best["title"],
         "approved": int(price * 0.8),
-        "per_100k_discount": int(round(annuity(100_000, DEMO_RATE, best["years"]))),
+        "per_100k_discount": int(round(annuity(100_000, best["rate"], best["years"]))),
     }
 
 
@@ -485,8 +528,9 @@ def viewing_checklist(listing: dict) -> list[str]:
     return items
 
 
-def deal_plan(listing: dict, final_price: int, down_payment: int | None, today: date | None = None) -> dict:
-    """down_payment=None — покупка без ипотеки."""
+def deal_plan(listing: dict, final_price: int, down_payment: int | None, today: date | None = None,
+              rate: float | None = None, program: str | None = None) -> dict:
+    """down_payment=None — покупка без ипотеки. rate — ставка выбранной программы (по умолчанию рыночная)."""
     today = today or date.today()
     if down_payment is None:
         steps = [
@@ -504,11 +548,13 @@ def deal_plan(listing: dict, final_price: int, down_payment: int | None, today: 
         }
     loan = max(0, final_price - down_payment)
     years = 30
-    pay = annuity(loan, DEMO_RATE, years)
-    pay_before = annuity(max(0, listing["price"] - down_payment), DEMO_RATE, years)
+    rate = DEMO_RATE if rate is None else rate
+    program = program or "Рыночная ипотека Сбера"
+    pay = annuity(loan, rate, years)
+    pay_before = annuity(max(0, listing["price"] - down_payment), rate, years)
     steps = [
         (0, "Цена согласована", "Итог звонка и запись разговора — в журнале сделки"),
-        (1, "Заявка на ипотеку по объекту", f"Кредит {fmt(loan)} на {years} лет"),
+        (1, "Заявка на ипотеку по объекту", f"{program}: кредит {fmt(loan)} на {years} лет под {rate * 100:.1f}%".replace(".", ",")),
         (3, "Оценка залога", "Аккредитованная оценочная компания, онлайн-заказ"),
         (4, "Выписки ЕГРН и проверка продавца", "Собственники, обременения, долги, банкротство"),
         (6, "Страхование", "Имущество, жизнь, титул — СберСтрахование"),
@@ -521,6 +567,8 @@ def deal_plan(listing: dict, final_price: int, down_payment: int | None, today: 
         "loan": loan,
         "down_payment": down_payment,
         "years": years,
+        "rate": rate,
+        "program": program,
         "monthly": int(round(pay, -2)),
         "monthly_saved": int(round(pay_before - pay, -1)),
         "costs": deal_costs(final_price, loan),

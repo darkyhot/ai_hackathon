@@ -81,7 +81,7 @@ export function finance(d, opened = {}, selected) {
       </div>
     </section>`;
   }
-  if (d.mode === "mortgage") return mortgage(d.mortgage);
+  if (d.mode === "mortgage") return programs(d.programs) + mortgage(d.mortgage);
   const f = d.finance;
   const sel = f.strategies.find((s) => s.key === (selected || f.risk)) || f.strategies[0];
   const alloc = sel.mix.map((m) => ({ ...m, amount_now: Math.round((f.available * m.share) / 1000) * 1000, monthly: Math.round((f.monthly * m.share) / 1000) * 1000 }));
@@ -91,7 +91,7 @@ export function finance(d, opened = {}, selected) {
     <h2 class="panel-title">Финансовая подготовка</h2>
     <p class="panel-lead">${f.verdict}</p>
     <div class="fin-kpis">
-      <div><span class="k">Нужно на взнос 20% и сделку</span><b class="num">${rub(f.need)}</b></div>
+      <div><span class="k">Нужно на взнос 20% и сделку</span><b class="num">${rub(f.need)}</b>${html.raw(f.matcap ? html`<small>маткапитал ${rub(f.matcap)} уже учтён</small>` : "")}</div>
       <div><span class="k">Можно направить сейчас</span><b class="num">${rub(f.available)}</b><small>подушка ${rub(f.cushion)} остаётся</small></div>
       <div class="${f.gap ? "is-gap" : "is-ok"}"><span class="k">${f.gap ? "Не хватает" : "Хватает с запасом"}</span><b class="num">${rub(f.gap || f.available - f.need)}</b></div>
       <div><span class="k">Откладывать в месяц</span><b class="num">${rub(f.monthly)}</b><small>70% от свободных ${rub(f.free_monthly)}</small></div>
@@ -117,7 +117,49 @@ export function finance(d, opened = {}, selected) {
     </div>
     <p class="hint">${f.assumption} Риск-профиль в проде подтвердит анкета брокера.</p>
   </section>
+  ${html.raw(programs(d.programs))}
   ${html.raw(mortgage(d.mortgage))}`;
+}
+
+const PROGRAM_TAG = {
+  ok: ["tag-green", "подходит"], no: ["tag-red", "не подходит"], check: ["tag-amber", "нужно уточнить"], info: ["tag-amber", "для сравнения"],
+};
+
+function programs(p) {
+  if (!p) return "";
+  const cards = p.programs.map((c) => {
+    const [cls, label] = PROGRAM_TAG[c.status] || PROGRAM_TAG.check;
+    const chosen = c.key === p.chosen;
+    const showPay = c.show_payment !== false;
+    return html`
+      <article class="scenario program ${chosen ? "is-best" : ""} ${c.status === "no" ? "is-off" : ""}">
+        <p class="program-head"><span class="tag ${cls}">${chosen ? "считаем по ней" : label}</span></p>
+        <h3>${c.title}</h3>
+        <div class="big num">${pct(c.rate)}${html.raw(c.subsidy_years ? html`<small class="program-sub"> первые ${c.subsidy_years} лет</small>` : "")}</div>
+        <dl>
+          ${html.raw(showPay ? html`<dt>Платёж</dt><dd class="num">${rub(c.monthly)} / мес</dd>` : "")}
+          ${html.raw(showPay && c.monthly_after_subsidy ? html`<dt>После ${c.subsidy_years} лет*</dt><dd class="num">≈ ${rub(c.monthly_after_subsidy)}</dd>` : "")}
+          ${html.raw(showPay ? html`<dt>Взнос</dt><dd class="num">${rub(c.down_payment)}</dd>` : "")}
+          ${html.raw(c.limit ? html`<dt>Лимит кредита</dt><dd class="num">${mln(c.limit)}</dd>` : "")}
+        </dl>
+        <ul class="program-why">${html.raw(c.reasons.map((r) => html`<li>${r}</li>`).join(""))}</ul>
+      </article>`;
+  });
+  const cap = p.matcap ? html`
+    <div class="alloc" style="margin-top:14px">
+      <div class="alloc-row">
+        <div><strong>Маткапитал во взнос — ${rub(p.matcap.amount)}</strong><small>${p.matcap.note}</small></div>
+        <div class="num">${rub(p.matcap.own_down)}<small>своих на взнос</small></div>
+      </div>
+    </div>` : "";
+  return html`
+  <section class="panel">
+    <h2 class="panel-title">Ипотечные программы</h2>
+    <p class="panel-lead">${p.explanation}</p>
+    <div class="scenarios">${html.raw(cards.join(""))}</div>
+    ${html.raw(cap)}
+    <p class="hint">${p.assumption}${p.programs.some((c) => c.monthly_after_subsidy) ? " * Льготная ставка субсидируется не дольше 15 лет; дальше — по договору с банком (в расчёте условно 12%)." : ""}</p>
+  </section>`;
 }
 
 function mortgage(m) {
@@ -131,6 +173,7 @@ function mortgage(m) {
         <h3>${s.title}</h3>
         <div class="big num">${rub(s.monthly)}<small style="font-size:14px;font-weight:500"> / мес</small></div>
         <dl>
+          <dt>Ставка</dt><dd class="num">${pct(s.rate)}</dd>
           <dt>Кредит</dt><dd class="num">${rub(s.loan)}</dd>
           <dt>Первый взнос</dt><dd class="num">${rub(s.down_payment)}</dd>
           <dt>Переплата</dt><dd class="num">${mln(s.overpay)}</dd>
@@ -142,7 +185,7 @@ function mortgage(m) {
   return html`
   <section class="panel">
     <h2 class="panel-title">Ипотека</h2>
-    <p class="panel-lead">Три сценария по ставке ${pct(m.rate)} (допущение). Каждые 100 000 ₽, которые агент сторгует, — это минус ${rub(m.per_100k_discount)} в месяц.</p>
+    <p class="panel-lead">${m.program || "Ипотека"}: три сценария${m.scenarios.every((s) => s.rate === m.rate) ? ` по ставке ${pct(m.rate)}` : ", ставка зависит от взноса"}. Каждые 100 000 ₽, которые агент сторгует, — это минус ${rub(m.per_100k_discount)} в месяц.</p>
     <div class="scenarios">${html.raw(cards.join(""))}</div>
   </section>`;
 }
@@ -290,7 +333,7 @@ export function deal(d) {
   return html`
   <section class="panel">
     <h2 class="panel-title">План сделки</h2>
-    <p class="panel-lead">${d.cash ? "Без ипотеки: деньги через сервис безопасных расчётов, регистрация — электронно." : `Взнос ${rub(d.down_payment)}, ипотека ${rub(d.loan)} на ${d.years} лет, платёж ${rub(d.monthly)} в месяц — на ${rub(d.monthly_saved)} меньше благодаря торгу.`}</p>
+    <p class="panel-lead">${d.cash ? "Без ипотеки: деньги через сервис безопасных расчётов, регистрация — электронно." : `Взнос ${rub(d.down_payment)}, ${(d.program || "ипотека").toLowerCase()} ${rub(d.loan)} на ${d.years} лет под ${pct(d.rate)}, платёж ${rub(d.monthly)} в месяц — на ${rub(d.monthly_saved)} меньше благодаря торгу.`}</p>
     <div class="two-col">
       <ol class="timeline">
         ${html.raw(d.timeline.map((t) => html`<li><time>${shortDate(t.date)}</time><span class="pt"></span><div><strong>${t.title}</strong><span>${t.note}</span></div></li>`).join(""))}

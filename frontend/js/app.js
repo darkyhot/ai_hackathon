@@ -73,6 +73,43 @@ function financeForm(ev) {
     </div>`;
 }
 
+function familyForm(ev) {
+  const d = ev.defaults;
+  const hasCap = d.matcap > 0;
+  return html`
+    <div class="fin-form family-form">
+      <label>Сколько детей
+        <select name="children">
+          ${html.raw([[0, "Детей нет"], [1, "1"], [2, "2"], [3, "3"], [4, "4"], [5, "5 и больше"]]
+            .map(([v, t]) => html`<option value="${v}" ${v === d.children ? "selected" : ""}>${t}</option>`).join(""))}
+        </select>
+      </label>
+      <label data-age>Возраст младшего, полных лет<input type="number" min="0" max="25" step="1" name="youngest_age" value="${d.youngest_age}" placeholder="например, 4"></label>
+      <label class="radio"><input type="checkbox" name="has_matcap" ${hasCap ? "checked" : ""}>Есть неизрасходованный маткапитал</label>
+      <label data-cap ${hasCap ? "" : "hidden"}>Сумма маткапитала, ₽<input type="number" min="0" step="1000" name="matcap" value="${d.matcap || d.matcap_default}"></label>
+    </div>`;
+}
+
+function bindFamilyForm(card) {
+  const kids = card.querySelector("[name=children]");
+  const age = card.querySelector("[data-age]");
+  const has = card.querySelector("[name=has_matcap]");
+  const cap = card.querySelector("[data-cap]");
+  const sync = () => { age.hidden = kids.value === "0"; cap.hidden = !has.checked; };
+  kids.addEventListener("change", sync);
+  has.addEventListener("change", sync);
+  sync();
+  return () => {
+    const children = Number(kids.value);
+    const ageVal = card.querySelector("[name=youngest_age]").value;
+    return {
+      children,
+      youngest_age: children && ageVal !== "" ? Number(ageVal) : null,
+      matcap: has.checked ? Number(card.querySelector("[name=matcap]").value) || 0 : 0,
+    };
+  };
+}
+
 function collectForm(card) {
   const data = {};
   card.querySelectorAll(".fin-form input, .fin-form select").forEach((i) => {
@@ -118,11 +155,16 @@ function confirmCard(ev) {
     extra.innerHTML = financeForm(ev);
     collect = () => collectForm(card);
   }
+  if (ev.kind === "family") {
+    extra.innerHTML = familyForm(ev);
+    collect = bindFamilyForm(card);
+  }
 
   const buttons = {
     red_lines: [["Подтвердить рамки", true, {}], ["Изменить запрос", false, {}]],
     finance: ev.price ? [["Рассчитать стратегию", true, {}], ["Пропустить", false, {}]] : [["Посчитать бюджет", true, {}], ["Взять пример", false, {}]],
     payment: [["Наличными — вся сумма есть", true, { payment: "cash" }], ["Ипотека, на взнос хватает", true, { payment: "mortgage_ready" }], ["Ипотека, взнос ещё копим", true, { payment: "mortgage_saving" }]],
+    family: [["Подобрать программу", true, {}], ["Пропустить", false, {}]],
     finance_choice: ev.gap ? [["Перейти к поиску квартиры", true, {}], ["Сначала накопить", false, {}]] : [["Перейти к поиску квартиры", true, {}]],
     call: [["Звонить — продавца играет ИИ", true, { mode: "auto" }], ["Звонить — продавец я", true, { mode: "human" }], ["Пропустить объект", false, {}]],
     price: [[`Подтвердить ${rub(ev.price)}`, true, {}], ["Отклонить, звонить дальше", false, {}]],

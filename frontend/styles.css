@@ -229,6 +229,12 @@ button, input, textarea { font: inherit; color: inherit; }
 .scenario dl { margin: 12px 0 0; display: grid; grid-template-columns: auto auto; gap: 4px 12px; font-size: 13px; }
 .scenario dt { color: var(--ink-3); }
 .scenario dd { margin: 0; text-align: right; }
+.program-head { margin: 0 0 8px; }
+.program .program-sub { font-size: 13px; font-weight: 500; color: var(--ink-3); letter-spacing: 0; }
+.program.is-off { opacity: .85; }
+.program.is-off .big { color: var(--ink-3); }
+.program-why { margin: 12px 0 0; padding-left: 18px; font-size: 13px; color: var(--ink-2); display: grid; gap: 4px; }
+.family-form [hidden] { display: none; }
 .tag { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
 .tag-green { background: var(--green-soft); color: var(--green-strong); }
 .tag-amber { background: var(--amber-soft); color: var(--amber); }
