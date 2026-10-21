@@ -165,6 +165,7 @@ function confirmCard(ev) {
     finance: ev.price ? [["Рассчитать стратегию", true, {}], ["Пропустить", false, {}]] : [["Посчитать бюджет", true, {}], ["Взять пример", false, {}]],
     payment: [["Наличными — вся сумма есть", true, { payment: "cash" }], ["Ипотека, на взнос хватает", true, { payment: "mortgage_ready" }], ["Ипотека, взнос ещё копим", true, { payment: "mortgage_saving" }]],
     family: [["Подобрать программу", true, {}], ["Пропустить", false, {}]],
+    housing: [["Новостройки и вторичка", true, { housing: "both" }], ["Только новостройки", true, { housing: "new" }], ["Только вторичка", true, { housing: "secondary" }]],
     finance_choice: ev.gap ? [["Перейти к поиску квартиры", true, {}], ["Сначала накопить", false, {}]] : [["Перейти к поиску квартиры", true, {}]],
     call: [["Звонить — продавца играет ИИ", true, { mode: "auto" }], ["Звонить — продавец я", true, { mode: "human" }], ["Пропустить объект", false, {}]],
     price: [[`Подтвердить ${rub(ev.price)}`, true, {}], ["Отклонить, звонить дальше", false, {}]],

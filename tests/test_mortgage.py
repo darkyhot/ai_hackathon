@@ -98,14 +98,13 @@ class HousingTypeTest(unittest.TestCase):
         fam = {"children": 2, "youngest_age": 3}
         silent = M.programs(15_000_000, "Москва", fam, housing="secondary")["explanation"]
         loud = M.programs(15_000_000, "Москва", fam, housing=None)["explanation"]
-        self.assertNotIn("новостройки пока не подключены", silent, "клиент сам сказал «вторичка»")
-        self.assertIn("Ищу на вторичном рынке", loud)
+        self.assertNotIn("вы не сказали", silent, "клиент сам сказал «вторичка»")
+        self.assertIn("Считаю для вторичного рынка", loud)
 
     def test_client_wants_new_build(self):
-        r = M.programs(9_000_000, "Казань", {"children": 1, "youngest_age": 4}, housing="new")
-        self.assertIn("Новостройки в поиске пока не подключены", r["explanation"])
-        self.assertIn("подошла бы семейная", r["explanation"])
-        self.assertEqual(r["chosen"], "market", "подборка — вторичка, считаем по рыночной")
+        r = M.programs(7_000_000, "Казань", {"children": 1, "youngest_age": 4}, housing="new", is_secondary=False)
+        self.assertIn("Считаю для новостройки", r["explanation"])
+        self.assertEqual(r["chosen"], "family", "новостройка до 7,5 млн — семейная проходит")
 
     def test_no_children_no_school(self):
         self.assertFalse(T.merge_profile(T.parse_request_rules("Двушка в Казани до 9 млн, детей нет"))["near_school"])

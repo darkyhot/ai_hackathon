@@ -147,15 +147,19 @@ def ranked(pool: list[dict], meta: dict[str, dict], prefs: P.Prefs) -> list[dict
 
 def card(x: dict, meta: dict) -> dict:
     m = meta[x["id"]]
-    return {**x, "fair": m["fair"], "score": m["total"], "missing": [q["label"] for q in T.missing_info(x, 4)
-                                                                       if q["key"] != "owners"]}
+    return {**x, "fair": m["fair"], "score": m["total"], "pay": m.get("pay"),
+            "missing": [q["label"] for q in T.missing_info(x, 4) if q["key"] not in ("owners", "contract")]}
 
 
 async def score_into(pool: list[dict], comps: list[dict], profile: dict, meta: dict) -> None:
     for x in pool:
         if x["id"] not in meta:
             fp = T.fair_price(x, comps)
-            meta[x["id"]] = {"fair": fp, "score": T.score_listing(x, profile, fp)}
+            score = T.score_listing(x, profile, fp)
+            pay = M.listing_payment(x, profile) if profile.get("payment") not in (None, "cash") else None
+            if pay and pay["program"] == "семейная":
+                score += 6  # платёж заметно ниже — для семьи это важнее пары метров
+            meta[x["id"]] = {"fair": fp, "score": score, "pay": pay}
 
 
 async def ask_affordability(s: Session, profile: dict, market: dict | None) -> tuple[dict, dict]:
@@ -197,10 +201,35 @@ async def ask_family(s: Session, profile: dict) -> dict:
     return M.normalize_family(r["data"])
 
 
+async def ask_housing(s: Session, profile: dict, progs: dict | None) -> None:
+    """Где искать. Если семейная не проходит на вторичке, но прошла бы в новостройке, — предлагаем клиенту выбор.
+    Тип жилья, который клиент назвал сам, не переспрашиваем."""
+    if profile.get("housing") in ("new", "secondary", "both"):
+        return
+    alt = next((c for c in (progs or {}).get("programs", []) if c["key"] == "family_new"), None)
+    if not alt:
+        profile["housing"] = "secondary"
+        return
+    market = next(c for c in progs["programs"] if c["key"] == "market")
+    cap = M.max_family_price(profile["city"], profile)
+    limit = f" для квартир до {T.fmt(cap)} при взносе 20%" if cap and cap < profile["budget_max"] else ""
+    r = await s.ask(
+        "housing", "Где искать",
+        f"Семейная ипотека работает в новостройках{limit}: ставка {alt['rate'] * 100:.0f}%, платёж около "
+        f"{T.fmt(alt['monthly'])} вместо {T.fmt(market['monthly'])} на вторичке. Искать и там, и там?",
+    )
+    profile["housing"] = r["data"].get("housing", "secondary") if r["approved"] else "secondary"
+    where = {"both": "Ищу и в новостройках, и на вторичке — у каждой квартиры покажу платёж по подходящей программе.",
+             "new": "Ищу только в новостройках — посчитаю по семейной ипотеке, где она проходит.",
+             "secondary": "Хорошо, ищу на вторичке."}[profile["housing"]]
+    await s.say(where)
+
+
 async def choose_program(s: Session, profile: dict, price: int) -> dict:
     family = await ask_family(s, profile)
     profile.update(family)
-    progs = M.programs(price, profile["city"], family, housing=profile.get("housing"))
+    progs = M.programs(price, profile["city"], family, housing=profile.get("housing"),
+                       is_secondary=profile.get("housing") != "new")
     s.mortgage = progs
     await s.say(progs["explanation"])
     return progs
@@ -333,13 +362,15 @@ async def pipeline(s: Session) -> None:
             await s.step(2, "done")
             await s.emit("done", status="saving")
             return
+    await ask_housing(s, profile, progs)
     await s.step(2, "done")
 
     # 3. Поиск (если ничего нет — предлагаем, что поменять, и ищем снова)
     await s.step(3, "active")
     for attempt in range(4):
         where = profile["city"] + (f", {profile['okrug']}" if profile.get("okrug") else "")
-        await s.say(f"Ищу на Циане: {where}, {T.rooms_text(profile['rooms'])}, вторичный рынок, до {T.fmt(profile['budget_max'])}.")
+        market_txt = {"new": "новостройки", "both": "новостройки и вторичка"}.get(profile.get("housing"), "вторичный рынок")
+        await s.say(f"Ищу на Циане: {where}, {T.rooms_text(profile['rooms'])}, {market_txt}, до {T.fmt(profile['budget_max'])}.")
         listings, report = await sources.collect(profile)
         pool = [x for x in listings if T.passes_hard_filters(x, profile)]
         if pool:
@@ -444,9 +475,13 @@ async def pipeline(s: Session) -> None:
     await s.emit("result", step=5, kind="legal", data={"checks": list(checks.values()),
                                                          "listings": [card(x, meta) for x in candidates]})
     warned = [x for x in candidates if checks[x["id"]]["status"] == "warn"]
+    totals = sorted({c["total"] for c in checks.values()}) or [0]
+    total = totals[-1]
+    total_txt = f"{totals[0]}–{totals[-1]}" if len(totals) > 1 else str(total)
     await s.say(f"Проверил {len(candidates)} {T.plural(len(candidates), 'объект', 'объекта', 'объектов')} по данным объявлений"
-                + (f"; есть оговорки у {len(warned)} — покажу юристу." if warned else "; явных рисков не видно.")
-                + " Выписки ЕГРН и проверку продавца закажу после выбора квартиры.")
+                + (f"; есть оговорки у {len(warned)} — отметил, что проверить в первую очередь." if warned else "; тревожных признаков не видно.")
+                + f" До сделки закажу {total_txt} {T.plural(total, 'проверку', 'проверки', 'проверок')} по реестрам на объект — "
+                  "пока выписок нет, «чисто» не пишу.")
     await s.step(5, "done")
 
     # 6–9 по кандидатам (если цена не устроила — следующий)
@@ -523,19 +558,21 @@ async def pipeline(s: Session) -> None:
             down = None
         else:
             down = s.finance["down_payment"] if s.finance else int(profile["budget_max"] * 0.2)
-        prog = s.mortgage or {}
-        prog_card = next((c for c in prog.get("programs", []) if c["key"] == prog.get("chosen")), None)
+        pay = M.listing_payment(listing, profile, price=price, down_share=down / price) if down else None
         plan = T.deal_plan(listing, price, down,
-                           rate=prog.get("rate") if prog.get("chosen") != "market" else None,
-                           program=prog_card["title"] if prog_card else None)
+                           rate=pay["rate"] if pay and pay["program"] == "семейная" else None,
+                           program=pay["title"] if pay else None)
         await s.emit("result", step=8, kind="deal", data=plan)
         if plan["cash"]:
             await s.say("Собрал план сделки без ипотеки: проверка продавца, договор с электронной подписью, "
                         "деньги через сервис безопасных расчётов, электронная регистрация — около 9 дней.")
         else:
-            await s.say(f"Собрал план сделки: ипотека {T.fmt(plan['loan'])}, платёж {T.fmt(plan['monthly'])} в месяц "
-                        f"(на {T.fmt(plan['monthly_saved'])} меньше благодаря торгу). Регистрация — электронно, деньги через СБР.")
-        r = await s.ask("sign", "Подписание договора", "Подписать договор купли-продажи электронной подписью?")
+            tail = ("Деньги — на эскроу-счёте до сдачи дома, ДДУ зарегистрируем электронно." if plan.get("new")
+                    else "Регистрация — электронно, деньги через СБР.")
+            await s.say(f"Собрал план сделки: {plan['program'].lower()} {T.fmt(plan['loan'])}, платёж {T.fmt(plan['monthly'])} в месяц "
+                        f"(на {T.fmt(plan['monthly_saved'])} меньше благодаря торгу). {tail}")
+        contract = "договор участия в долевом строительстве (ДДУ)" if listing.get("is_new") else "договор купли-продажи"
+        r = await s.ask("sign", "Подписание договора", f"Подписать {contract} электронной подписью?")
         if not r["approved"]:
             await s.say("Подписание отложено. Все документы сохранены — вернёмся, когда будете готовы.")
             await s.emit("done", status="paused")

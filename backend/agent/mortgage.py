@@ -230,7 +230,7 @@ def programs(price: int, city: str | None, family: dict | None, *, down_share: f
             alt = {"key": "family_new", "title": "Семейная — если рассмотреть новостройку", "status": "info",
                    "limit": f_limit, "subsidy_years": SUBSIDY_YEARS, **_loan_row(price, need_down, f_rate),
                    "reasons": [f"Та же цена {_fmt(price)}, взнос {_fmt(need_down)}, ставка {_pct(f_rate)} первые {SUBSIDY_YEARS} лет. "
-                               "Новостройки в подборе пока нет — ищем по вторичке на Циане."]}
+                               "Могу искать и в новостройках — спрошу, где искать."]}
             alt["monthly_after_subsidy"] = _family_after_subsidy(alt)
         family_card["monthly_after_subsidy"] = _family_after_subsidy(family_card)
     else:
@@ -271,19 +271,11 @@ def explain(cards: list[dict], chosen: dict, mc: dict | None, housing: str | Non
     by = {c["key"]: c for c in cards}
     market, family, alt = by["market"], by["family"], by.get("family_new")
     parts = []
-    if housing == "new" and alt:
-        parts.append(f"Новостройки в поиске пока не подключены — сейчас ищу только на вторичном рынке. "
-                     f"Для новостройки вам подошла бы семейная ипотека: {_pct(alt['rate'])}, платёж {_fmt(alt['monthly'])} "
-                     f"при взносе {_fmt(alt['down_payment'])}. На вторичке она не действует. {family.get('main_reason') or ''}")
-        parts.append(f"Для квартир из подборки считаю по рыночной ставке {_pct(market['rate'])}: платёж {_fmt(market['monthly'])}.")
-        if mc:
-            parts.append(f"Маткапитал {_fmt(mc['amount'])} пойдёт во взнос — из своих нужно {_fmt(mc['own_down'])}.")
-        return " ".join(parts)
     if housing == "new":
-        parts.append("Новостройки в поиске пока не подключены — ищу на вторичном рынке.")
+        parts.append("Считаю для новостройки.")
     elif housing is None and alt:
-        # тип жилья не назван, а от него зависит семейная ипотека — говорим допущение
-        parts.append("Ищу на вторичном рынке — новостройки пока не подключены.")
+        # тип жилья не назван, а от него зависит семейная ипотека — говорим допущение и предложим выбор
+        parts.append("Считаю для вторичного рынка — вы не сказали, новостройка или вторичка.")
     if family["status"] == "ok":
         diff = market["monthly"] - family["monthly"]
         parts.append(f"Вам подходит семейная ипотека: {_pct(family['rate'])} вместо {_pct(market['rate'])} по рыночной — "
@@ -305,3 +297,31 @@ def explain(cards: list[dict], chosen: dict, mc: dict | None, housing: str | Non
     if mc:
         parts.append(f"Маткапитал {_fmt(mc['amount'])} пойдёт во взнос — из своих нужно {_fmt(mc['own_down'])}.")
     return " ".join(parts)
+
+
+def listing_payment(listing: dict, profile: dict, price: int | None = None, down_share: float = 0.2) -> dict:
+    """Ипотека для конкретной квартиры: новостройка — семейная, если подходит; вторичка — по правилам города.
+
+    Для карточки подборки и плана сделки: программа, ставка, платёж и подсказка, если семейную
+    закрывает только лимит («семейная — при взносе от …»).
+    """
+    price = price or listing["price"]
+    r = programs(price, listing.get("city") or profile.get("city"), profile, down_share=down_share,
+                 is_secondary=not listing.get("is_new"), housing="new" if listing.get("is_new") else "secondary")
+    cards = {c["key"]: c for c in r["programs"]}
+    chosen = cards[r["chosen"]]
+    fam = cards["family"]
+    hint = None
+    if r["chosen"] == "market" and fam["status"] == "no" and fam.get("needs_down"):
+        hint = f"семейная — при взносе от {_fmt(fam['needs_down'])}"
+    return {"program": "семейная" if r["chosen"] == "family" else "рыночная", "title": chosen["title"],
+            "rate": chosen["rate"], "monthly": chosen["monthly"], "down": chosen["down_payment"], "hint": hint}
+
+
+def max_family_price(city: str | None, family: dict | None, down_share: float = 0.2) -> int | None:
+    """До какой цены квартиры проходит семейная при взносе down_share (лимит кредита / (1 − взнос))."""
+    fam = normalize_family(family)
+    if not fam["children"] or fam["youngest_age"] is None or fam["youngest_age"] >= FAMILY_CHILD_AGE:
+        return None
+    _, limit = family_terms(city, fam["children"])
+    return int(limit / (1 - down_share) // 100_000 * 100_000)
