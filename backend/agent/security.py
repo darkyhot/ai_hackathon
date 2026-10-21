@@ -85,8 +85,8 @@ def dossier(listing: dict) -> dict:
     for pattern, key, why in TRIGGERS:
         if re.search(pattern, text):
             flagged.setdefault(key, why)
-    if listing.get("seller_role", "").startswith("собственник (переуступка"):
-        flagged.setdefault("contract", "продаёт не застройщик")
+    if "уступк" in (listing.get("sale_type") or "") or "переуступка" in (listing.get("seller_role") or ""):
+        flagged.setdefault("contract", "переуступка: нужна вся цепочка договоров и согласие застройщика")
 
     items = []
     for key, title, source, shows in base:

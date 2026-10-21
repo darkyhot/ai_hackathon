@@ -154,26 +154,29 @@ SALE_TYPES = {"fz214": "ДДУ (214-ФЗ)", "dupt": "договор уступк
 
 
 def _deadline(o: dict) -> tuple[str | None, bool | None]:
-    """Срок сдачи новостройки: («4 кв. 2027», False) или («дом сдан», True). Поля Циана бывают в разных местах."""
+    """Срок сдачи корпуса: («4 кв. 2027», False) или («дом сдан», True).
+    Точнее всего — newbuilding.house.finishDate (это «Сдача корпуса» на карточке Циана), потом building.deadline."""
     nb = o.get("newbuilding") or {}
     house = nb.get("house") or {}
-    dl = (o.get("building") or {}).get("deadline") or house.get("deadline") or nb.get("deadline") or {}
+    dl = house.get("finishDate") or (o.get("building") or {}).get("deadline") or {}
     finished = house.get("isFinished") if house.get("isFinished") is not None else dl.get("isComplete")
     if finished:
         return "дом сдан", True
-    q, y = QUARTERS.get(dl.get("quarter") or dl.get("quarterEnd")), dl.get("year")
+    q, y = QUARTERS.get(dl.get("quarter")), dl.get("year")
     if y:
         return (f"{q} кв. {y}" if q else f"{y} г."), False
     return None, finished
 
 
-def _developer(o: dict) -> str | None:
+def _from_developer(o: dict) -> bool:
     nb = o.get("newbuilding") or {}
-    for v in (nb.get("newbuildingFeatures") or {}).get("builders") or [], nb.get("builders") or []:
-        if v and isinstance(v[0], dict) and v[0].get("name"):
-            return v[0]["name"]
-    user = o.get("user") or {}
-    if user.get("isBuilder") or user.get("isDeveloper"):
+    return bool(o.get("fromDeveloper") or nb.get("isFromDeveloper") or nb.get("isFromBuilder") or (o.get("user") or {}).get("isBuilder"))
+
+
+def _developer(o: dict) -> str | None:
+    """Имя застройщика Циан отдаёт только когда продаёт он сам (в выдаче у остальных — лишь id застройщика)."""
+    if _from_developer(o):
+        user = o.get("user") or {}
         return user.get("companyName") or user.get("agencyName")
     return None
 
@@ -248,7 +251,13 @@ def _new_fields(o: dict, terms: dict) -> dict:
     nb = o.get("newbuilding") or {}
     deadline, finished = _deadline(o)
     developer = _developer(o)
-    from_developer = bool(developer) or bool((o.get("user") or {}).get("isBuilder")) or terms.get("saleType") == "fz214"
+    user = o.get("user") or {}
+    if _from_developer(o):
+        role = "застройщик"
+    elif user.get("isAgent"):
+        role = "агент продавца (переуступка)"
+    else:
+        role = "собственник (переуступка)" if terms.get("saleType") == "dupt" else "собственник"
     return {
         "is_new": True,
         "complex": nb.get("name") or None,          # ЖК
@@ -256,7 +265,7 @@ def _new_fields(o: dict, terms: dict) -> dict:
         "finished": finished,
         "developer": developer,
         "sale_type": SALE_TYPES.get(terms.get("saleType"), terms.get("saleType")),
-        "seller_role": "застройщик" if from_developer else "собственник (переуступка или вторичка в новом доме)",
+        "seller_role": role,
     }
 
 
@@ -454,7 +463,11 @@ if __name__ == "__main__":  # прогрев среза
     async def main():
         total = 0
         for p in range(1, args.pages + 1):
-            items, report = await search(args.city, args.rooms, args.budget, p, args.okrug, args.new)
+            try:
+                items, report = await search(args.city, args.rooms, args.budget, p, args.okrug, args.new)
+            except SourceUnavailable as exc:  # следующая страница не отдалась — сохранённое не теряем
+                print(f"страница {p}: {exc} — останавливаюсь, сохранённое осталось")
+                break
             total += len(items)
             print(f"страница {p}: {len(items)} объявлений ({report['status']})")
             for x in items[:3]:

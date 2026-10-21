@@ -580,6 +580,23 @@ def deal_plan(listing: dict, final_price: int, down_payment: int | None, today: 
     program = program or "Рыночная ипотека Сбера"
     pay = annuity(loan, rate, years)
     pay_before = annuity(max(0, listing["price"] - down_payment), rate, years)
+    if listing.get("is_new") and "уступк" in (listing.get("sale_type") or ""):
+        steps = [  # переуступка: права по ДДУ переходят от дольщика к покупателю, деньги — продавцу через СБР
+            (0, "Цена согласована с продавцом", "Итог звонка и запись разговора — в журнале сделки"),
+            (1, "Проверка ДДУ и цепочки", "Оплачен ли ДДУ, согласие застройщика, ЕИСЖС: дом и сроки"),
+            (2, "Заявка на ипотеку по объекту", f"{program}: кредит {fmt(loan)} на {years} лет под {rate * 100:.1f}%".replace(".", ",")),
+            (5, "Страхование", "Жизнь заёмщика — СберСтрахование; имущество — после сдачи дома"),
+            (7, "Подписание договора уступки", "Электронная подпись, уступка прав по ДДУ"),
+            (7, "Безопасные расчёты", "Деньги уходят продавцу только после регистрации уступки"),
+            (14, "Регистрация уступки", "Росреестр электронно — без визитов"),
+        ]
+        return {
+            "cash": False, "new": True, "assignment": True, "loan": loan, "down_payment": down_payment, "years": years,
+            "rate": rate, "program": program, "monthly": int(round(pay, -2)), "monthly_saved": int(round(pay_before - pay, -1)),
+            "costs": {"Страхование жизни, 1-й год": int(round(loan * 0.004, -2)), "Сервис безопасных расчётов": 6_900,
+                      "Электронная регистрация уступки": 2_000},
+            "timeline": [{"date": (today + timedelta(days=d)).isoformat(), "title": t, "note": n} for d, t, n in steps],
+        }
     if listing.get("is_new"):
         steps = [
             (0, "Цена согласована с застройщиком", "Итог звонка и запись разговора — в журнале сделки"),

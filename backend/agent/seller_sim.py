@@ -42,11 +42,14 @@ def build_new(listing: dict, rnd: random.Random) -> dict:
         "floors": f"в доме {listing['floors']} этажей" if listing.get("floors") else f"в доме {rnd.choice([12, 16, 17, 20, 25])} этажей",
     }
     is_dev = listing.get("seller_role") == "застройщик"
+    if not is_dev:  # переуступка: продаёт дольщик (часто через агента), а не застройщик
+        facts["contract"] = "переуступка прав по ДДУ, застройщик согласие даёт, ДДУ оплачен полностью"
+        flex = round(rnd.uniform(0.015, 0.04), 4)
     return {
         "name": rnd.choice(DEV_NAMES) if is_dev else rnd.choice(NAMES),
         "role": f"отдел продаж, {developer}" if is_dev else listing.get("seller_role") or "собственник",
         "min_price": int(round(price * (1 - flex), -4)),
-        "motivation": "план продаж по корпусу" if is_dev else "переуступка: продаю до сдачи дома",
+        "motivation": "план продаж по корпусу" if is_dev else "переуступка: дольщик продаёт до сдачи дома",
         "style": "вежливый, держится за прайс, уступает за ипотеку с банком-партнёром или быстрое бронирование",
         "availability": rnd.choice(["офис продаж ежедневно 10:00–20:00", "будни и суббота, показ квартиры-образца"]),
         "facts": facts,

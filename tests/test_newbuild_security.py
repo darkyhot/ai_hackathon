@@ -37,16 +37,43 @@ class CianNewBuildTest(unittest.TestCase):
         self.assertIn("object_type%5B0%5D=2", cian.build_url("Казань", 2, 9_000_000, new=True))
 
     def test_normalize_keeps_ddu_only_for_new_builds(self):
-        o = {"cianId": 5, "totalArea": "55", "roomsCount": 2, "bargainTerms": {"priceRur": 7_000_000, "saleType": "fz214"},
-             "newbuilding": {"name": "Солнечный", "house": {"isFinished": False}},
-             "building": {"deadline": {"quarter": "fourth", "year": 2027, "isComplete": False}, "floorsCount": 16},
-             "user": {"isBuilder": True, "companyName": "ГК Тест"}}
+        """Структура — как в реальной выдаче Циана по новостройкам Казани (21.10.2026)."""
+        o = {"cianId": 5, "totalArea": "47.49", "roomsCount": 2, "fromDeveloper": True, "decoration": "rough",
+             "bargainTerms": {"priceRur": 8_999_999, "saleType": "fz214"},
+             "newbuilding": {"name": "Экосити", "isFromDeveloper": True,
+                             "house": {"finishDate": {"year": 2029, "quarter": 1}, "isFinished": False}},
+             "building": {"deadline": {"quarter": "first", "year": 2029, "isComplete": False}, "floorsCount": 16},
+             "user": {"isBuilder": True, "isAgent": True, "companyName": "GloraX"}}
         self.assertIsNone(cian.normalize(o, "Казань"), "во вторичке ДДУ не нужен")
         x = cian.normalize(o, "Казань", new=True)
         self.assertTrue(x["is_new"])
-        self.assertEqual((x["complex"], x["deadline"], x["developer"]), ("Солнечный", "4 кв. 2027", "ГК Тест"))
-        self.assertEqual(x["seller_role"], "застройщик")
-        self.assertEqual(x["sale_type"], "ДДУ (214-ФЗ)")
+        self.assertEqual((x["complex"], x["deadline"], x["developer"]), ("Экосити", "1 кв. 2029", "GloraX"))
+        self.assertEqual((x["seller_role"], x["sale_type"], x["condition"]), ("застройщик", "ДДУ (214-ФЗ)", "без отделки"))
+
+    def test_normalize_assignment_by_agent(self):
+        o = {"cianId": 6, "totalArea": "33.0", "roomsCount": 2, "fromDeveloper": False,
+             "bargainTerms": {"priceRur": 7_990_000, "saleType": "dupt"},
+             "newbuilding": {"name": "Батталовский", "isFromDeveloper": False,
+                             "house": {"finishDate": {"year": 2027, "quarter": 1}, "isFinished": False}},
+             "building": {"deadline": {"quarter": "second", "year": 2026}},
+             "user": {"isBuilder": False, "isAgent": True, "companyName": "Агентство"}}
+        x = cian.normalize(o, "Казань", new=True)
+        self.assertEqual(x["deadline"], "1 кв. 2027", "срок сдачи корпуса важнее срока по дому")
+        self.assertIsNone(x["developer"], "имя застройщика у переуступки Циан не отдаёт — не выдумываем")
+        self.assertEqual((x["seller_role"], x["sale_type"]), ("агент продавца (переуступка)", "договор уступки"))
+        d = S.dossier(x)
+        self.assertTrue(next(i for i in d["before_deal"] if i["key"] == "contract")["priority"])
+        plan = T.deal_plan(x, 7_800_000, 1_600_000)
+        self.assertTrue(plan["assignment"])
+        self.assertIn("Безопасные расчёты", " ".join(t["title"] for t in plan["timeline"]))
+
+    def test_demo_snapshot_new_builds(self):
+        with mock.patch.object(cian, "demo_mode", return_value=True):
+            items, rep = asyncio.run(cian.search("Казань", 2, 9_000_000, new=True))
+        self.assertEqual(rep["status"], "demo")
+        self.assertGreaterEqual(len(items), 10)
+        self.assertTrue(all(x["is_new"] for x in items))
+        self.assertTrue(any(x["seller_role"] == "застройщик" for x in items))
 
     def test_markets_by_housing(self):
         self.assertEqual(sources.markets({"housing": None}), [False])

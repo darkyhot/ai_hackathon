@@ -314,6 +314,8 @@ def listing_payment(listing: dict, profile: dict, price: int | None = None, down
     hint = None
     if r["chosen"] == "market" and fam["status"] == "no" and fam.get("needs_down"):
         hint = f"семейная — при взносе от {_fmt(fam['needs_down'])}"
+    elif r["chosen"] == "family" and "уступк" in (listing.get("sale_type") or ""):
+        hint = "переуступка — банк проверит договор по условиям программы"
     return {"program": "семейная" if r["chosen"] == "family" else "рыночная", "title": chosen["title"],
             "rate": chosen["rate"], "monthly": chosen["monthly"], "down": chosen["down_payment"], "hint": hint}
 
