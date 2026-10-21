@@ -55,6 +55,7 @@ export function profile(p) {
       <div><dt>Город</dt><dd>${p.city}${p.okrug ? `, ${p.okrug}` : ""}</dd></div>
       <div><dt>Комнат</dt><dd>${rooms}</dd></div>
       <div><dt>Бюджет до</dt><dd class="num">${rub(p.budget_max)}${html.raw(p.budget_source ? html`<small class="dd-note">${p.budget_source}</small>` : "")}</dd></div>
+      <div><dt>Рынок</dt><dd>вторичный${p.housing === "new" ? html.raw(html`<small class="dd-note">новостройки пока не подключены</small>`) : ""}</dd></div>
       <div><dt>Районы</dt><dd>${p.districts?.length ? p.districts.join(", ") : "любые"}</dd></div>
       <div><dt>Школа рядом</dt><dd>${p.near_school ? "важно" : "не важно"}</dd></div>
       <div><dt>Кухня</dt><dd>${p.kitchen_min ? `от ${p.kitchen_min} м²` : "любая"}</dd></div>

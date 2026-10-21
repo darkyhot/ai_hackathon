@@ -33,6 +33,7 @@ EMPTY_PROFILE = {
     "children": None,         # сколько детей (0 — нет), для семейной ипотеки
     "youngest_age": None,     # возраст младшего ребёнка, лет
     "matcap": None,           # есть неизрасходованный маткапитал: True / сумма
+    "housing": None,          # тип жилья: secondary | new | None (не сказал); ищем пока только вторичку
     "wishes": [],
 }
 
@@ -113,7 +114,20 @@ def parse_request_rules(query: str) -> dict:
     if metro:
         p["metro_max_minutes"] = int(metro.group(1))
     p.update(family_from_text(q))
+    if p.get("children") == 0 and "школ" not in q:  # «детей нет» — школа не нужна
+        p["near_school"] = False
+    p["housing"] = housing_from_text(q)
     return p
+
+
+def housing_from_text(text: str | None) -> str | None:
+    """«новостройка», «от застройщика», «первичка» -> new; «вторичка», «вторичный рынок» -> secondary."""
+    q = (text or "").lower().replace("ё", "е")
+    if re.search(r"новостро|от застройщик|первичк|первичн\w* рын|в строящ|сдаче|долев", q):
+        return "new"
+    if re.search(r"вторичк|вторичн|готов\w* жиль", q):
+        return "secondary"
+    return None
 
 
 CHILD_WORDS = r"(?:ребен\w*|сын\w*|доч\w*|малыш\w*|дет\w*)"
@@ -171,6 +185,8 @@ def merge_profile(raw: dict, base: dict | None = None) -> dict:
         p["okrug"] = okrug_from_text(p["okrug"]) or (p["okrug"] if p["okrug"] in ("ЦАО", "САО", "СВАО", "ВАО", "ЮВАО", "ЮАО", "ЮЗАО", "ЗАО", "СЗАО") else None)
     if p.get("city") != "Москва":
         p["okrug"] = None
+    if p.get("housing") not in (None, "secondary", "new"):
+        p["housing"] = None
     if p.get("payment") not in (None, "cash", "mortgage_ready", "mortgage_saving"):
         p["payment"] = None
     if p.get("budget_max"):
@@ -242,7 +258,8 @@ def profile_summary(p: dict) -> str:
     if p["metro_max_minutes"]:
         extra.append(f"до метро до {p['metro_max_minutes']} мин")
     tail = (", " + ", ".join(extra)) if extra else ""
-    return f"Ищу {rooms} в {where} до {fmt(p['budget_max'])}{tail}."
+    market = " в новостройке" if p.get("housing") == "new" else " на вторичном рынке"
+    return f"Ищу {rooms}{market} в {where} до {fmt(p['budget_max'])}{tail}."
 
 
 # ---------------------------------------------------------------- ипотека

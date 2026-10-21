@@ -84,6 +84,33 @@ class FamilyParsingTest(unittest.TestCase):
         self.assertEqual(T.merge_profile({"rooms": 0})["rooms"], 0, "студия не теряется")
 
 
+class HousingTypeTest(unittest.TestCase):
+    """Тип жилья клиент мог не назвать: агент не додумывает молча, а говорит, что ищет на вторичке."""
+
+    def test_parse_housing(self):
+        self.assertEqual(T.housing_from_text("двушка в новостройке"), "new")
+        self.assertEqual(T.housing_from_text("квартира от застройщика"), "new")
+        self.assertEqual(T.housing_from_text("ищем вторичку"), "secondary")
+        self.assertIsNone(T.housing_from_text("двушка в Казани до 9 млн"))
+        self.assertIn("на вторичном рынке", T.profile_summary(T.merge_profile(T.parse_request_rules("Двушка в Казани до 9 млн"))))
+
+    def test_assumption_said_out_loud(self):
+        fam = {"children": 2, "youngest_age": 3}
+        silent = M.programs(15_000_000, "Москва", fam, housing="secondary")["explanation"]
+        loud = M.programs(15_000_000, "Москва", fam, housing=None)["explanation"]
+        self.assertNotIn("новостройки пока не подключены", silent, "клиент сам сказал «вторичка»")
+        self.assertIn("Ищу на вторичном рынке", loud)
+
+    def test_client_wants_new_build(self):
+        r = M.programs(9_000_000, "Казань", {"children": 1, "youngest_age": 4}, housing="new")
+        self.assertIn("Новостройки в поиске пока не подключены", r["explanation"])
+        self.assertIn("подошла бы семейная", r["explanation"])
+        self.assertEqual(r["chosen"], "market", "подборка — вторичка, считаем по рыночной")
+
+    def test_no_children_no_school(self):
+        self.assertFalse(T.merge_profile(T.parse_request_rules("Двушка в Казани до 9 млн, детей нет"))["near_school"])
+
+
 class CalculationsTest(unittest.TestCase):
     def test_matcap_reduces_savings_need(self):
         a = F.plan(9_000_000, {}, matcap=0)

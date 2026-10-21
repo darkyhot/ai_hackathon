@@ -137,8 +137,11 @@ def _family_after_subsidy(row: dict) -> int:
 
 
 def programs(price: int, city: str | None, family: dict | None, *, down_share: float = 0.2,
-             is_secondary: bool = True, secondary_ok: bool | None = "lookup") -> dict:
+             is_secondary: bool = True, secondary_ok: bool | None = "lookup", housing: str | None = None) -> dict:
     """Какие программы подходят для квартиры за price в городе city.
+
+    housing — что просил клиент: "secondary" / "new" / None (не сказал). Ищем пока только вторичку,
+    поэтому расчёт всегда для вторички, а об этом допущении агент говорит вслух.
 
     Возвращает карточки программ со статусом ok / no / check, причинами простыми словами,
     платежами и итоговым выбором (по нему считаются бюджет, план накоплений и сделка).
@@ -254,16 +257,33 @@ def programs(price: int, city: str | None, family: dict | None, *, down_share: f
     return {
         "family": fam, "city": city, "price": price, "secondary": is_secondary,
         "programs": cards, "chosen": chosen["key"], "rate": chosen["rate"],
-        "matcap": mc, "explanation": explain(cards, chosen, mc),
+        "housing": housing,
+        "matcap": mc, "explanation": explain(cards, chosen, mc, housing),
         "assumption": "Ставки — по открытым данным на октябрь 2026; итог даст предодобрение Сбера.",
     }
 
 
-def explain(cards: list[dict], chosen: dict, mc: dict | None) -> str:
-    """Короткое объяснение для чата: что подходит, что нет и почему, сколько это в рублях в месяц."""
+def explain(cards: list[dict], chosen: dict, mc: dict | None, housing: str | None = None) -> str:
+    """Короткое объяснение для чата: что подходит, что нет и почему, сколько это в рублях в месяц.
+
+    Тип жилья клиент мог не назвать — тогда говорим вслух, что ищем на вторичке, а не додумываем молча.
+    """
     by = {c["key"]: c for c in cards}
     market, family, alt = by["market"], by["family"], by.get("family_new")
     parts = []
+    if housing == "new" and alt:
+        parts.append(f"Новостройки в поиске пока не подключены — сейчас ищу только на вторичном рынке. "
+                     f"Для новостройки вам подошла бы семейная ипотека: {_pct(alt['rate'])}, платёж {_fmt(alt['monthly'])} "
+                     f"при взносе {_fmt(alt['down_payment'])}. На вторичке она не действует. {family.get('main_reason') or ''}")
+        parts.append(f"Для квартир из подборки считаю по рыночной ставке {_pct(market['rate'])}: платёж {_fmt(market['monthly'])}.")
+        if mc:
+            parts.append(f"Маткапитал {_fmt(mc['amount'])} пойдёт во взнос — из своих нужно {_fmt(mc['own_down'])}.")
+        return " ".join(parts)
+    if housing == "new":
+        parts.append("Новостройки в поиске пока не подключены — ищу на вторичном рынке.")
+    elif housing is None and alt:
+        # тип жилья не назван, а от него зависит семейная ипотека — говорим допущение
+        parts.append("Ищу на вторичном рынке — новостройки пока не подключены.")
     if family["status"] == "ok":
         diff = market["monthly"] - family["monthly"]
         parts.append(f"Вам подходит семейная ипотека: {_pct(family['rate'])} вместо {_pct(market['rate'])} по рыночной — "

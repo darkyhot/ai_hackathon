@@ -192,7 +192,7 @@ async def ask_family(s: Session, profile: dict) -> dict:
 async def choose_program(s: Session, profile: dict, price: int) -> dict:
     family = await ask_family(s, profile)
     profile.update(family)
-    progs = M.programs(price, profile["city"], family)
+    progs = M.programs(price, profile["city"], family, housing=profile.get("housing"))
     s.mortgage = progs
     await s.say(progs["explanation"])
     return progs
@@ -331,7 +331,7 @@ async def pipeline(s: Session) -> None:
     await s.step(3, "active")
     for attempt in range(4):
         where = profile["city"] + (f", {profile['okrug']}" if profile.get("okrug") else "")
-        await s.say(f"Ищу на Циане: {where}, {T.rooms_text(profile['rooms'])}, до {T.fmt(profile['budget_max'])}.")
+        await s.say(f"Ищу на Циане: {where}, {T.rooms_text(profile['rooms'])}, вторичный рынок, до {T.fmt(profile['budget_max'])}.")
         listings, report = await sources.collect(profile)
         pool = [x for x in listings if T.passes_hard_filters(x, profile)]
         if pool:
