@@ -370,8 +370,9 @@ async def pipeline(s: Session) -> None:
     for attempt in range(4):
         where = profile["city"] + (f", {profile['okrug']}" if profile.get("okrug") else "")
         market_txt = {"new": "новостройки", "both": "новостройки и вторичка"}.get(profile.get("housing"), "вторичный рынок")
-        on = " и ".join(sources.names(profile["city"])) or "площадках"
-        on = on.replace("Циан", "Циане").replace("Домклик", "Домклике")
+        sites = [{"Циан": "Циане", "Домклик": "Домклике", "Яндекс Недвижимость": "Яндекс Недвижимости"}.get(n, n)
+                 for n in sources.names(profile["city"])]
+        on = (", ".join(sites[:-1]) + " и " + sites[-1]) if len(sites) > 1 else (sites[0] if sites else "площадках")
         await s.say(f"Ищу на {on}: {where}, {T.rooms_text(profile['rooms'])}, {market_txt}, до {T.fmt(profile['budget_max'])}.")
         listings, report = await sources.collect(profile)
         pool = [x for x in listings if T.passes_hard_filters(x, profile)]

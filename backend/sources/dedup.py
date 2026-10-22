@@ -62,11 +62,19 @@ def difference(a: dict, b: dict) -> float | None:
     if km is not None:
         if km > MAX_KM:
             return None
-    else:
+    else:  # координат нет хотя бы у одного: сверяем адрес, а у новостроек — ещё и название ЖК
         sa, sb = _street_house(a.get("address")), _street_house(b.get("address"))
-        if not (sa and sb and sa == sb):
+        same_complex = bool(new and _complex(a) and _complex(a) == _complex(b))
+        if not ((sa and sb and sa == sb) or same_complex):
             return None
     return d_area + d_price * 10
+
+
+def _complex(x: dict) -> str | None:
+    """«ЖК «Батталовский»», «Батталовский», «ЖК Батталовский» -> «батталовский»."""
+    name = (x.get("complex") or "").lower().replace("ё", "е")
+    name = re.sub(r"^жк\s+|[«»\"]", "", name).strip()
+    return name or None
 
 
 def same_flat(a: dict, b: dict) -> bool:

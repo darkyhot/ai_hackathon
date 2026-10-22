@@ -20,7 +20,7 @@ export function welcome(cities = []) {
     <div class="examples">
       ${html.raw(EXAMPLES.map((e) => html`<button class="example" data-example="${e}">${e}</button>`).join(""))}
     </div>
-    <p class="hint">Объявления — с Циана и Домклика${cities.length ? `: ${cities.join(", ")}` : ""}. Одна и та же квартира с разных сайтов — одна карточка.</p>
+    <p class="hint">Объявления — с Циана, Домклика, Авито и Яндекс Недвижимости${cities.length ? `: ${cities.join(", ")}` : ""}. Одна и та же квартира с разных сайтов — одна карточка.</p>
   </section>`;
 }
 
@@ -194,8 +194,8 @@ function mortgage(m) {
 // ------------------------------------------------------------------ поиск и цена
 
 function sourceChip(r) {
-  const label = { live: "живые данные", cached: "кеш сессии", snapshot: "сохранённый срез", demo: "демо-срез", unavailable: "недоступен" }[r.status] || r.status;
-  const cls = r.status === "unavailable" ? "tag-red" : r.status === "snapshot" || r.status === "demo" ? "tag-amber" : "tag-green";
+  const label = { live: "живые данные", cached: "кеш сессии", snapshot: "сохранённый срез", demo: "демо-срез", static: "сохранённые", unavailable: "недоступен" }[r.status] || r.status;
+  const cls = r.status === "unavailable" ? "tag-red" : ["snapshot", "demo", "static"].includes(r.status) ? "tag-amber" : "tag-green";
   return html`<span class="source-chip"><b>${r.source}</b> ${r.count} ${plural(r.count, "объявление", "объявления", "объявлений")} <span class="tag ${cls}">${label}</span></span>`;
 }
 
@@ -245,6 +245,11 @@ function metroText(m) {
   return `м. ${m.name || ""} ${m.minutes} мин ${m.mode}`.replace("  ", " ");
 }
 
+// «на Циане», «на Домклике», «на Авито», «на Яндекс Недвижимости»
+const ON_SITE = { "Циан": "Циане", "Домклик": "Домклике", "Яндекс Недвижимость": "Яндекс Недвижимости" };
+const onSite = (name) => ON_SITE[name] || name;
+const SHORT = { "Яндекс Недвижимость": "Яндекс" };
+
 function offerCard(c, vote) {
   const rooms = c.rooms === 0 ? "Студия" : `${c.rooms}-комн.`;
   const floor = c.floor ? `${c.floor}${c.floors ? `/${c.floors}` : ""} эт.` : "";
@@ -256,15 +261,16 @@ function offerCard(c, vote) {
   if (offers.length > 1) {
     const sorted = [...offers].sort((a, b) => a.price - b.price);
     const diff = sorted[sorted.length - 1].price - sorted[0].price;
-    const links = offers.map((o) => (o.url ? html`<a href="${o.url}" target="_blank" rel="noopener noreferrer">${o.source_name}</a>` : o.source_name)).join(" и ");
-    where = html`<p class="offer-where">Есть на ${html.raw(links)}${diff > 0 ? ` · на ${sorted[0].source_name === "Циан" ? "Циане" : "Домклике"} дешевле на ${rub(diff)}` : " · цена одинаковая"}</p>`;
+    const linkList = offers.map((o) => (o.url ? html`<a href="${o.url}" target="_blank" rel="noopener noreferrer">${onSite(o.source_name)}</a>` : onSite(o.source_name)));
+    const links = linkList.length > 1 ? `${linkList.slice(0, -1).join(", ")} и ${linkList[linkList.length - 1]}` : linkList[0];
+    where = html`<p class="offer-where">Есть на ${html.raw(links)}${diff > 0 ? ` · на ${onSite(sorted[0].source_name)} дешевле на ${rub(diff)}` : " · цена одинаковая"}</p>`;
   }
   const pay = c.pay ? html`<p class="offer-pay ${c.pay.program === "семейная" ? "is-family" : ""}"><b class="num">≈ ${rub(c.pay.monthly)}/мес</b> ${c.pay.program} ${pct(c.pay.rate)}${c.pay.hint ? ` · ${c.pay.hint}` : ""}</p>` : "";
   return html`
   <article class="offer ${vote === "up" ? "is-liked" : vote === "down" ? "is-disliked" : ""}" data-id="${c.id}">
     <a class="offer-photo" ${c.url ? html.raw(html`href="${c.url}" target="_blank" rel="noopener noreferrer"`) : ""} aria-label="Открыть объявление на площадке">
       ${html.raw(c.photo ? html`<img src="${c.photo}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : "")}
-      <span class="offer-src">${(c.sources || [c.source_name]).join(" · ")}</span>
+      <span class="offer-src">${(c.sources || [c.source_name]).map((n) => SHORT[n] || n).join(" · ")}</span>
     </a>
     <div class="offer-body">
       <div class="offer-price"><span class="num">${rub(c.price)}</span> ${html.raw(priceTag(c))}</div>

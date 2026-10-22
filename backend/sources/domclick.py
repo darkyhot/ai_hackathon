@@ -83,6 +83,16 @@ def demo_mode() -> bool:
     return settings.demo
 
 
+_blocked_until = 0.0
+BLOCK_PAUSE = 30 * 60   # после неудачи 30 минут не пробуем вживую — сразу сохранённые объявления
+
+
+def static_mode() -> bool:
+    """Живой поиск отключён настройкой STATIC_SOURCES или недавно не прошёл защиту (не ждём попыток снова)."""
+    from ..config import settings
+    return SOURCE in [x.strip() for x in settings.static_sources.split(",")] or time.time() < _blocked_until
+
+
 def build_url(city: str, rooms: int, budget: int | None, page: int = 1, new: bool = False) -> str:
     room = "st" if rooms == 0 else "5%2B" if rooms >= 5 else str(rooms)
     url = (f"https://domclick.ru/search?deal_type=sale&category=living&offer_type={'layout' if new else 'flat'}"
@@ -454,14 +464,16 @@ async def search(city: str, rooms: int, budget: int | None, page: int = 1, okrug
     """Возвращает (объявления, отчёт). Отчёт: status live | cached | snapshot | demo | unavailable."""
     if not supported(city):
         raise SourceUnavailable(f"для города «{city}» Домклик не подключён")
-    if demo_mode():
+    if demo_mode() or static_mode():
+        why = "демо-режим" if demo_mode() else "живой поиск закрыт защитой площадки"
         if page > 1:
-            raise SourceUnavailable("демо-режим: больше страниц нет")
+            raise SourceUnavailable(f"{why}: больше страниц нет")
         saved, fetched_at = load_snapshot(city, rooms, new=new)
         saved = _filter(saved, budget, okrug)
         if not saved:
-            raise SourceUnavailable(f"демо-режим: нет сохранённых объявлений Домклика для «{city}»")
-        return saved, {"status": "demo", "note": f"демо-режим: сохранённый срез Домклика от {fetched_at}"}
+            raise SourceUnavailable(f"{why}: нет сохранённых объявлений Домклика для «{city}»")
+        return saved, {"status": "demo" if demo_mode() else "static",
+                       "note": f"{why}: сохранённые объявления Домклика от {fetched_at}"}
     key = (city, rooms, budget, page, new)
     hit = _memory.get(key)
     if hit and time.time() - hit[0] < CACHE_TTL:
@@ -472,7 +484,9 @@ async def search(city: str, rooms: int, budget: int | None, page: int = 1, okrug
         _save_snapshot(city, rooms, listings, new)
         return _filter(listings, budget, okrug), {"status": "live", "note": f"страница {page} ({via})", "via": via}
     except SourceUnavailable as exc:
+        global _blocked_until
         log.warning("%s", exc)
+        _blocked_until = time.time() + BLOCK_PAUSE
         if page > 1:
             raise
         saved, fetched_at = load_snapshot(city, rooms, new=new)
@@ -495,6 +509,7 @@ if __name__ == "__main__":  # проверка с ноутбука и прогр
     ap.add_argument("--window", action="store_true", help="браузер сразу с окном (если без окна не пускает)")
     args = ap.parse_args()
     DUMP_RAW = args.dump
+    static_mode = lambda: False  # noqa: E731 — проверка с ноутбука всегда пробует вживую
     if args.window:
         BROWSER_MODES[:] = ["window"]
     logging.basicConfig(level=logging.INFO, format="%(message)s")

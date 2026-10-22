@@ -12,11 +12,12 @@ import asyncio
 
 from . import cian, dedup, domclick
 from .base import SourceUnavailable, description_flags, normalize_city
+from .static import avito, yandex
 
 __all__ = ["collect", "markets", "more", "comparables", "market", "enabled", "names", "normalize_city",
            "description_flags", "SourceUnavailable", "cian", "domclick", "dedup", "SUPPORTED_CITIES"]
 
-REGISTRY = {"cian": cian, "domclick": domclick}
+REGISTRY = {"cian": cian, "domclick": domclick, "avito": avito, "yandex": yandex}
 SUPPORTED_CITIES = list(cian.REGIONS)
 
 

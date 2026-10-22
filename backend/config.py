@@ -23,7 +23,9 @@ class Settings:
     # Демо-режим: объявления — из сохранённого среза Циана в репозитории (backend/data/demo), без сети
     demo: bool = _bool("DEMO", False)
     # Площадки объявлений через запятую: cian, domclick
-    sources: str = os.getenv("SOURCES", "cian,domclick")
+    sources: str = os.getenv("SOURCES", "cian,domclick,avito,yandex")
+    # Площадки за защитой от ботов: живые запросы не делаем, берём сохранённые объявления (быстро, без ожидания)
+    static_sources: str = os.getenv("STATIC_SOURCES", "domclick")
 
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
     deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")

@@ -10,6 +10,7 @@ from unittest import mock
 
 from backend import sources
 from backend.sources import cian, dedup, domclick
+from backend.sources.static import avito, yandex
 
 # Карточки — в структуре реальной выдачи Домклика по Казани (21.10.2026), личные данные убраны
 PRODUCT = {
@@ -129,6 +130,53 @@ class CollectTest(unittest.TestCase):
             items, report = asyncio.run(sources.collect({"city": "Казань", "rooms": 2, "budget_max": 9_000_000}))
         self.assertGreater(len(items), 10)
         self.assertEqual([r["status"] for r in report], ["demo", "unavailable"])
+
+
+class StaticSourcesTest(unittest.TestCase):
+    """Авито и Яндекс — только сохранённые объявления; Домклик — без ожидания попыток пробиться через защиту."""
+
+    def test_static_split_by_market(self):
+        sec, at = avito.load_snapshot("Казань", 2)
+        new, _ = avito.load_snapshot("Казань", 2, new=True)
+        self.assertTrue(sec and new and at)
+        self.assertTrue(all(not x["is_new"] for x in sec) and all(x["is_new"] for x in new))
+        items, rep = asyncio.run(yandex.search("Казань", 2, 9_000_000))
+        self.assertEqual(rep["status"], "static")
+        self.assertTrue(all(x["source_name"] == "Яндекс Недвижимость" and x["url"].startswith("https://realty.yandex.ru/offer/") for x in items))
+        with self.assertRaises(sources.SourceUnavailable):
+            asyncio.run(yandex.search("Казань", 2, 9_000_000, page=2))
+        self.assertFalse(avito.supported("Новосибирск"), "по другим городам сохранённых объявлений нет — честно")
+
+    def test_no_suburbs_in_kazan(self):
+        for src in (avito, yandex):
+            for new in (False, True):
+                for x in src.load_snapshot("Казань", 2, new=new)[0]:
+                    self.assertNotRegex(x["address"], r"^(село|С\.|Д\.|Пос\.)")
+
+    def test_domclick_static_mode_skips_network(self):
+        with mock.patch.object(domclick, "static_mode", return_value=True), \
+             mock.patch.object(domclick, "demo_mode", return_value=False), \
+             mock.patch.object(domclick, "_fetch_page", side_effect=AssertionError("живой запрос не нужен")):
+            items, rep = asyncio.run(domclick.search("Казань", 2, 9_000_000))
+        self.assertEqual(rep["status"], "static")
+        self.assertGreater(len(items), 20)
+
+    def test_new_build_same_complex_without_coords(self):
+        lay = domclick.normalize(LAYOUT, "Казань", new=True)
+        ya = {"id": "yandex-1", "source": "yandex", "source_name": "Яндекс Недвижимость", "address": "ЖК Батталовский",
+              "complex": "Батталовский", "rooms": 2, "area": 33.2, "floor": 15, "price": 8600000, "is_new": True,
+              "seller_role": "застройщик", "lat": None, "lng": None}
+        self.assertEqual(len(dedup.merge([lay, ya])), 1)
+        self.assertEqual(len(dedup.merge([lay, {**ya, "complex": "Экосити"}])), 2)
+
+    def test_four_sources_demo(self):
+        with mock.patch.object(cian, "demo_mode", return_value=True), \
+             mock.patch.object(domclick, "demo_mode", return_value=True), \
+             mock.patch.object(sources, "enabled", return_value=[cian, domclick, avito, yandex]):
+            items, report = asyncio.run(sources.collect({"city": "Казань", "rooms": 2, "budget_max": 9_000_000, "housing": "both"}))
+        self.assertEqual(len(report), 8)
+        self.assertGreaterEqual(dedup.duplicates_count(items), 25)
+        self.assertTrue(any(len(x["offers"]) >= 3 for x in items), "есть квартиры сразу на трёх площадках")
 
 
 if __name__ == "__main__":
