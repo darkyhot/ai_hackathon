@@ -53,11 +53,25 @@ def configure(url: str | None = None) -> Engine:
                 cur.execute("PRAGMA journal_mode=WAL")
             cur.close()
     Base.metadata.create_all(engine)
+    _add_missing_columns(engine)
     _engine, _Session = engine, sessionmaker(engine, expire_on_commit=False, future=True)
     from . import seed
     with session() as db:
         seed.features_catalog(db)
     return engine
+
+
+def _add_missing_columns(engine: Engine) -> None:
+    """Простейшая миграция: новые колонки моделей добавляются в уже созданные таблицы (без Alembic)."""
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name not in have:
+                    conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {col.type.compile(engine.dialect)}'))
+                    log.info("база: добавлена колонка %s.%s", table.name, col.name)
 
 
 def engine() -> Engine:

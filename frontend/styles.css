@@ -721,3 +721,6 @@ dialog.modal::backdrop { background: rgba(10, 20, 15, .45); }
   .topbar-tools { flex-wrap: wrap; justify-content: flex-end; gap: 8px; min-width: 0; }
   .provider { white-space: nowrap; }
 }
+
+.page-check { margin: 4px 0 0; font-size: 12px; color: var(--ink-3); }
+.page-check.is-ok { color: var(--green-strong); }

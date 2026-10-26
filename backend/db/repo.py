@@ -96,7 +96,9 @@ def upsert_listings(db: Session, items: Iterable[dict], now: datetime | None = N
         l = db.get(Listing, x["id"])
         if l is None:
             source, ext = _split_id(x["id"])
-            l = Listing(id=x["id"], source=x.get("source") or source, external_id=ext, first_seen_at=now)
+            l = Listing(id=x["id"], source=x.get("source") or source, external_id=ext, first_seen_at=now,
+                        city=x.get("city") or "", rooms=x.get("rooms") or 0, area=x.get("area") or 0,
+                        price=int(x["price"]), data=x)
             l.photos, l.prices, l.features = [], [], []
             db.add(l)
             stats["added"] += 1
@@ -118,7 +120,8 @@ def upsert_listings(db: Session, items: Iterable[dict], now: datetime | None = N
             l.published_at = datetime.fromisoformat(x["published_at"])
         elif l.published_at is None and x.get("days_on_market") is not None:
             l.published_at = now - timedelta(days=int(x["days_on_market"]))
-        l.complex = _complex(db, x)
+        with db.no_autoflush:  # запрос ЖК не должен сбрасывать в базу недозаполненную строку
+            l.complex = _complex(db, x)
         l.data = x
         l.status, l.removed_at, l.miss_count, l.last_seen_at = "active", None, 0, now
         if changed:
@@ -142,6 +145,29 @@ def listing_dict(l: Listing, today: date | None = None) -> dict:
             x["price_drop"] = first - l.price  # снижение с первого появления — аргумент в торге
     x["first_seen"] = l.first_seen_at.date().isoformat()
     return x
+
+
+def recent_page_checks(db: Session, ids: Iterable[str], max_age_min: int) -> dict[str, dict]:
+    """Проверки страниц, сделанные недавно: {id: {"alive", "note", "checked_at"}}."""
+    since = utcnow() - timedelta(minutes=max_age_min)
+    rows = db.scalars(select(Listing).where(Listing.id.in_(list(ids)), Listing.page_checked_at >= since,
+                                            Listing.page_alive.is_not(None))).all()  # «не удалось» — проверяем снова
+    return {l.id: {"alive": l.page_alive, "note": l.page_note, "checked_at": l.page_checked_at.isoformat() + "Z"}
+            for l in rows}
+
+
+def save_page_check(db: Session, listing: dict, alive: bool | None, note: str) -> None:
+    """Результат проверки страницы. Снято — объявление сразу уходит из выдачи (status removed)."""
+    l = db.get(Listing, listing["id"])
+    if l is None:
+        upsert_listings(db, [listing])
+        l = db.get(Listing, listing["id"])
+    now = utcnow()
+    l.page_checked_at, l.page_alive, l.page_note = now, alive, (note or "")[:120]
+    if alive is False and l.status != "removed":
+        l.status, l.removed_at = "removed", now
+    elif alive is True:
+        l.miss_count = 0
 
 
 def get_listing(db: Session, listing_id: str) -> Listing | None:
@@ -225,6 +251,13 @@ def sweep_missing(db: Session, t: TrackedSearch, seen_ids: set[str], threshold: 
         elif alive is True:
             l.miss_count = 0  # страница жива — просто выпало из первых страниц выдачи
     return removed
+
+
+def missing_candidates(db: Session, t: TrackedSearch, seen_ids: set[str], limit: int = 30) -> list[dict]:
+    """Активные объявления поиска, которых нет в этом обходе, — их страницы проверим перед снятием."""
+    q = _scope(select(Listing), t.city, t.rooms, t.is_new, t.okrug or None, t.budget_max).where(
+        Listing.status == "active", Listing.source == t.source)
+    return [{"id": l.id, "url": l.url, "source": l.source} for l in db.scalars(q).all() if l.id not in seen_ids][:limit]
 
 
 def tracked_searches(db: Session) -> list[TrackedSearch]:

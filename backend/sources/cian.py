@@ -434,12 +434,72 @@ def is_end_of_results(exc: SourceUnavailable, page: int) -> bool:
     return page > 1 and "ответ 30" in str(exc)
 
 
-async def check_listing_page(url: str | None) -> bool | None:
-    """ЗАГЛУШКА: открыть страницу объявления и понять, снято ли оно (True — живо, False — снято, None — не знаем).
+# Признаки снятого объявления на его странице. Циан не отдаёт 404 на снятые: страница открывается
+# с плашкой «Объявление снято с публикации», а в данных страницы — статус объявления.
+REMOVED_TEXT = re.compile(r"(объявление|квартира)\s+(снято|снята)\s+с\s+(публикации|продажи)|объявление\s+удалено|"
+                          r"объявление\s+в\s+архиве", re.I)
+REMOVED_STATUS = re.compile(r'"(?:status|offerStatus)"\s*:\s*"(?:deactivated|removed\w*|sold|deleted|blocked|archived?)"'
+                            r'|"isArchived"\s*:\s*true|"isRemoved"\s*:\s*true', re.I)
+PUBLISHED_STATUS = re.compile(r'"(?:status|offerStatus)"\s*:\s*"published"', re.I)
+PAGE_INTERVAL = 1.0
+_page_lock = asyncio.Lock()
+_page_last = 0.0
 
-    Нужна, чтобы не снимать объявление, которое просто ушло ниже первых страниц выдачи.
-    Пока None: решение принимается по числу обходов подряд без объявления (REMOVE_AFTER_MISSES)."""
-    return None
+
+def page_verdict(status: int, location: str, text: str, offer_id: str) -> tuple[bool | None, str]:
+    """(жива ли страница, почему). None — не удалось понять (капча, сеть, чужая страница)."""
+    if status in (404, 410):
+        return False, f"страница объявления отвечает {status}"
+    if status in (301, 302, 303, 307, 308):
+        if "captcha" in location:
+            return None, "капча"
+        if offer_id and offer_id in location:
+            return None, "редирект на ту же страницу"
+        return False, "площадка перенаправляет со страницы объявления — его сняли"
+    if status != 200:
+        return None, f"ответ {status}"
+    if offer_id and offer_id not in text:
+        return None, "на странице нет этого объявления"
+    if REMOVED_TEXT.search(text) or REMOVED_STATUS.search(text):
+        return False, "на странице: объявление снято с публикации"
+    if PUBLISHED_STATUS.search(text) or re.search(r'"priceRur"|"bargainTerms"', text):
+        return True, "объявление опубликовано"
+    return True, "страница объявления открывается"
+
+
+async def check_listing_page(url: str | None) -> tuple[bool | None, str]:
+    """Открыть страницу объявления: (True — активно, False — снято, None — не удалось проверить; пояснение).
+
+    Отдельный ограничитель частоты (раз в секунду), чтобы проверка подборки не ждала поисковых запросов.
+    При капче — повтор через curl_cffi, как и в поиске."""
+    global _page_last
+    if not url:
+        return None, "нет ссылки"
+    if demo_mode():
+        return None, "демо-режим: без сети"
+    offer_id = (re.search(r"/(\d{5,})/?", url) or [None, ""])[1]
+    getters = [_get_httpx]
+    try:
+        import curl_cffi  # noqa: F401
+        getters.append(_get_browser_like)
+    except ImportError:
+        pass
+    verdict: tuple[bool | None, str] = (None, "нет ответа")
+    for getter in getters:
+        async with _page_lock:
+            wait = PAGE_INTERVAL - (time.monotonic() - _page_last)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            _page_last = time.monotonic()
+        try:
+            status, location, text = await asyncio.wait_for(getter(url), timeout=12)
+        except Exception as exc:  # сеть, TLS, таймаут — пробуем следующий способ
+            verdict = (None, f"{type(exc).__name__}")
+            continue
+        verdict = page_verdict(status, location, text, offer_id)
+        if verdict[0] is not None:
+            break
+    return verdict
 
 
 async def market(city: str, rooms: int, okrug: str | None = None, new: bool = False) -> dict | None:

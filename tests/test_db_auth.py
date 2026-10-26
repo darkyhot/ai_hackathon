@@ -96,7 +96,9 @@ class RefreshTest(Base):
         async def fake(city, rooms, budget, page, okrug, new):
             return pages["items"] if page == 1 else []
 
-        with mock.patch.object(cian, "demo_mode", return_value=False), mock.patch.object(cian, "fetch_live", side_effect=fake):
+        unknown = mock.AsyncMock(return_value=(None, "сеть"))
+        with mock.patch.object(cian, "demo_mode", return_value=False), mock.patch.object(cian, "fetch_live", side_effect=fake), \
+                mock.patch.object(cian, "check_listing_page", unknown):
             r1 = asyncio.run(refresh.run_once())
             with db.session() as s:
                 self.assertEqual(s.get(Listing, "cian-2").status, "active")  # один пропуск — ещё не снимаем
@@ -130,6 +132,69 @@ class RefreshTest(Base):
         from backend.workers.refresh import _next_run
         self.assertEqual(_next_run("04:00", datetime(2026, 10, 26, 3, 0)), datetime(2026, 10, 26, 4, 0))
         self.assertEqual(_next_run("04:00", datetime(2026, 10, 26, 5, 0)), datetime(2026, 10, 27, 4, 0))
+
+
+class PageCheckTest(Base):
+    def test_verdicts(self):
+        v = cian.page_verdict
+        self.assertEqual(v(404, "", "", "1")[0], False)
+        self.assertEqual(v(301, "https://kazan.cian.ru/kupit-kvartiru/", "", "123456")[0], False)
+        self.assertIsNone(v(302, "https://www.cian.ru/captcha/?redirect=x", "", "123456")[0])
+        self.assertEqual(v(200, "", '<h1>Объявление снято с публикации</h1> 123456', "123456")[0], False)
+        self.assertEqual(v(200, "", '{"offerData":{"offer":{"cianId":123456,"status":"deactivated"}}}', "123456")[0], False)
+        self.assertEqual(v(200, "", '{"cianId":123456,"status":"published","bargainTerms":{"priceRur":1}}', "123456")[0], True)
+        self.assertIsNone(v(200, "", "<html>другая страница</html>", "123456")[0])
+        self.assertIsNone(v(503, "", "", "123456")[0])
+
+    def test_verify_removes_and_caches(self):
+        with db.session() as s:
+            repo.upsert_listings(s, [flat(1), flat(2)])
+        check = mock.AsyncMock(side_effect=lambda url: (False, "снято") if "/2/" in url else (True, "опубликовано"))
+        with mock.patch.object(cian, "demo_mode", return_value=False), mock.patch.object(cian, "check_listing_page", check):
+            r = asyncio.run(sources.verify([flat(1), flat(2)]))
+            self.assertEqual((r["cian-1"]["alive"], r["cian-2"]["alive"]), (True, False))
+            asyncio.run(sources.verify([flat(1)]))  # свежая проверка — из базы, без запроса
+        self.assertEqual(check.await_count, 2)
+        with db.session() as s:
+            self.assertEqual(s.get(Listing, "cian-2").status, "removed")
+            self.assertTrue(s.get(Listing, "cian-1").page_alive)
+
+    def test_verify_budget_gives_unknown(self):
+        async def slow(url):
+            await asyncio.sleep(5)
+            return True, "ok"
+        with mock.patch.object(cian, "demo_mode", return_value=False), mock.patch.object(cian, "check_listing_page", side_effect=slow):
+            r = asyncio.run(sources.verify([flat(1)], budget_s=0.2))
+        self.assertIsNone(r["cian-1"]["alive"])
+
+    def test_selection_replaces_removed(self):
+        from backend.agent import orchestrator as O
+        items = [flat(i) for i in range(1, 6)]
+        meta = {x["id"]: {} for x in items}
+        check = mock.AsyncMock(side_effect=lambda url: (False, "снято") if "/2/" in url or "/3/" in url else (True, "ok"))
+        with mock.patch.object(cian, "demo_mode", return_value=False), mock.patch.object(cian, "check_listing_page", check):
+            shown, gone = asyncio.run(O.alive_only(items, 3, meta))
+        self.assertEqual([x["id"] for x in shown], ["cian-1", "cian-4", "cian-5"])
+        self.assertEqual([x["id"] for x in gone], ["cian-2", "cian-3"])
+        self.assertTrue(meta["cian-1"]["page"]["alive"])
+
+    def test_refresh_uses_page_check(self):
+        from backend.workers import refresh
+        with db.session() as s:
+            repo.track_search(s, "Казань", 2, False, None, 9_000_000)
+            repo.upsert_listings(s, [flat(1), flat(2), flat(3)])
+
+        async def fake(city, rooms, budget, page, okrug, new):
+            return [flat(1)] if page == 1 else []
+        # cian-2 ушло ниже в выдаче (страница жива), cian-3 снято
+        check = mock.AsyncMock(side_effect=lambda url: (True, "ok") if "/2/" in url else (False, "снято"))
+        with mock.patch.object(cian, "demo_mode", return_value=False), mock.patch.object(cian, "fetch_live", side_effect=fake), \
+                mock.patch.object(cian, "check_listing_page", check):
+            for _ in range(3):
+                asyncio.run(refresh.run_once())
+        with db.session() as s:
+            self.assertEqual(s.get(Listing, "cian-2").status, "active")
+            self.assertEqual(s.get(Listing, "cian-3").status, "removed")
 
 
 class CallAnalyticsTest(unittest.TestCase):

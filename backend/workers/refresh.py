@@ -3,8 +3,9 @@
 Что обходим: tracked_searches — поиски, которые хоть раз задавали клиенты (город, комнаты,
 вторичка/новостройки, округ, самый большой бюджет). Для каждого — до REFRESH_PAGES страниц живой выдачи.
 
-Правило снятия: объявления нет в ПОЛНОМ обходе поиска (дошли до последней страницы) —
-пропуск +1; после REMOVE_AFTER_MISSES пропусков подряд — статус removed. Если обход неполный
+Правило снятия: объявления нет в ПОЛНОМ обходе поиска (дошли до последней страницы) — открываем
+его страницу: снято — removed сразу; страница жива — объявление просто ушло ниже в выдаче, остаётся;
+не удалось открыть — пропуск +1, после REMOVE_AFTER_MISSES пропусков подряд — removed. Если обход неполный
 (капча, сеть, страниц больше лимита), пропуски не считаем: лучше показать снятое объявление
 на день дольше, чем потерять живое. Объявление снова появилось — возвращается в active.
 Каждый обход пишется в crawl_runs.
@@ -70,13 +71,24 @@ async def run_once(trigger: str = "manual") -> dict:
             items, complete, error = await _crawl_search(t)
             if error:
                 errors.append(error)
+            pages: dict[str, bool | None] = {}
+            if complete and not cian.demo_mode():  # пропавшие из выдачи — сначала открываем их страницы
+                with db.session() as s:
+                    missing = repo.missing_candidates(s, s.get(TrackedSearch, tid), {x["id"] for x in items})
+                for m in missing:
+                    alive, note = await cian.check_listing_page(m["url"])
+                    pages[m["id"]] = alive
+                    with db.session() as s:
+                        l = s.get(repo.Listing, m["id"])
+                        l.page_checked_at, l.page_alive, l.page_note = utcnow(), alive, note[:120]
             with db.session() as s:
                 t = s.get(TrackedSearch, tid)
                 st = repo.upsert_listings(s, items)
                 for k in ("seen", "added", "updated", "price_changed"):
                     totals[k] += st[k]
                 if complete:
-                    totals["removed"] += repo.sweep_missing(s, t, {x["id"] for x in items}, settings.remove_after_misses)
+                    totals["removed"] += repo.sweep_missing(s, t, {x["id"] for x in items}, settings.remove_after_misses,
+                                                            page_check=lambda l: pages.get(l.id))
                     repo.mark_crawled(s, t, t.budget_max)
                 totals["searches"] += 1
             log.info("обход %s, %s-комн.%s: %d объявлений%s", t.city, t.rooms, " (новостройки)" if t.is_new else "",

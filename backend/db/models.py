@@ -201,6 +201,9 @@ class Listing(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)     # когда менялись данные
     removed_at: Mapped[datetime | None] = mapped_column(DateTime)
     miss_count: Mapped[int] = mapped_column(Integer, default=0)  # обходов подряд без этого объявления
+    page_checked_at: Mapped[datetime | None] = mapped_column(DateTime)  # когда открывали страницу объявления
+    page_alive: Mapped[bool | None] = mapped_column(Boolean)  # True — активно, False — снято, None — не удалось проверить
+    page_note: Mapped[str | None] = mapped_column(String(120))
 
     data: Mapped[dict] = mapped_column(JSON)  # объявление целиком в формате агента (sources/base.py)
 

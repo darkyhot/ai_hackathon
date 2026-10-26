@@ -176,9 +176,27 @@ def ranked(pool: list[dict], meta: dict[str, dict], prefs: P.Prefs) -> list[dict
     return sorted(pool, key=lambda x: meta[x["id"]]["total"], reverse=True)
 
 
+async def alive_only(candidates: list[dict], need: int, meta: dict, max_age_min: int | None = None) -> tuple[list[dict], list[dict]]:
+    """Перед показом клиенту открываем страницы объявлений: снятые убираем и добираем следующие по рейтингу.
+    Возвращает (что показать, что оказалось снято). «Не удалось проверить» показываем с пометкой."""
+    picked: list[dict] = []
+    gone: list[dict] = []
+    i = 0
+    while len(picked) < need and i < len(candidates):
+        chunk = candidates[i:i + need - len(picked)]
+        i += len(chunk)
+        res = await sources.verify(chunk, max_age_min=max_age_min)
+        for x in chunk:
+            r = res.get(x["id"]) or {"alive": None, "note": "не проверено", "checked_at": None}
+            if x["id"] in meta:
+                meta[x["id"]]["page"] = r
+            (gone if r["alive"] is False else picked).append(x)
+    return picked, gone
+
+
 def card(x: dict, meta: dict) -> dict:
     m = meta[x["id"]]
-    return {**x, "fair": m["fair"], "score": m["total"], "pay": m.get("pay"),
+    return {**x, "fair": m["fair"], "score": m["total"], "pay": m.get("pay"), "page": m.get("page"),
             "missing": [q["label"] for q in T.missing_info(x, 4) if q["key"] not in ("owners", "contract")]}
 
 
@@ -488,7 +506,19 @@ async def pipeline(s: Session) -> None:
                 order = ranked(pool, meta, s.prefs)
                 fresh = [x for x in order if x["id"] not in shown and x["id"] not in s.prefs.disliked and x["id"] not in s.prefs.liked
                  and x.get("district") not in s.prefs.districts_minus]
-        batch = liked + fresh[:BATCH]
+        liked, gone_l = await alive_only(liked, len(liked), meta)
+        fresh_ok, gone_f = await alive_only(fresh, BATCH, meta)
+        gone = gone_l + gone_f
+        if gone:
+            gone_ids = {x["id"] for x in gone}
+            pool[:] = [x for x in pool if x["id"] not in gone_ids]
+            for i in gone_ids:
+                by_id.pop(i, None)
+            s.prefs.liked = [i for i in s.prefs.liked if i not in gone_ids]
+            s.log("listings_removed", {"ids": sorted(gone_ids)})
+            await s.say(f"Проверил страницы объявлений: {len(gone)} {T.plural(len(gone), 'уже снято', 'уже сняты', 'уже сняты')} "
+                        f"с Циана ({', '.join(x['address'] for x in gone[:3])}) — убрал из подборки и добавил следующие.")
+        batch = liked + fresh_ok
         shown |= {x["id"] for x in batch}
         s.shown = [card(x, meta) for x in batch]
         repo.record(repo.save_marks, s.id, s.visitor_id, s.user_id, {"shown": [x["id"] for x in batch]})
@@ -537,7 +567,16 @@ async def pipeline(s: Session) -> None:
     await s.step(5, "done")
 
     # 6–9 по кандидатам (если цена не устроила — следующий)
-    for listing in candidates[:3]:
+    called = 0
+    for listing in candidates:
+        if called >= 3:
+            break
+        ok, gone = await alive_only([listing], 1, meta, max_age_min=10)  # перед звонком — свежая проверка
+        if gone:
+            repo.record(repo.log_event, "listings_removed", {"ids": [listing["id"]]}, s.visitor_id, s.user_id, s.id)
+            await s.say(f"Объявление {listing['address']} только что сняли с Циана — звонить не буду, перехожу к следующему.")
+            continue
+        called += 1
         fp = meta[listing["id"]]["fair"]
         s.current = {"listing": listing, "fair": fp}
         authority = min(profile["budget_max"], listing["price"], fp["high"])

@@ -49,6 +49,10 @@ class Settings:
     # Ежедневный обход объявлений: время «ЧЧ:ММ» (пусто — выключен в процессе сервера; есть отдельный воркер)
     refresh_at: str = os.getenv("REFRESH_AT", "")
     refresh_pages: int = _int("REFRESH_PAGES", 3)
+    # Проверка страницы объявления перед показом клиенту: сколько минут доверяем прошлой проверке
+    # и сколько секунд максимум ждём проверку одной подборки
+    listing_check_ttl_min: int = _int("LISTING_CHECK_TTL_MIN", 30)
+    listing_check_budget_s: int = _int("LISTING_CHECK_BUDGET_S", 25)
     # Сколько обходов подряд объявления нет в выдаче, прежде чем считать его снятым
     remove_after_misses: int = _int("REMOVE_AFTER_MISSES", 2)
     # Скачивать фото квартир на диск (иначе храним только ссылки)

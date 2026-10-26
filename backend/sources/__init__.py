@@ -130,3 +130,40 @@ async def more(profile: dict, page: int) -> list[dict]:
             except SourceUnavailable:
                 pass
     return dedup.merge(out)
+
+
+async def verify(items: list[dict], max_age_min: int | None = None, budget_s: float | None = None) -> dict[str, dict]:
+    """Перед показом клиенту: открыть страницы объявлений и убедиться, что они не сняты.
+
+    Возвращает {id: {"alive": True|False|None, "note", "checked_at"}}. Недавние проверки (LISTING_CHECK_TTL_MIN)
+    берутся из базы. Если площадка не ответила за LISTING_CHECK_BUDGET_S — «не удалось проверить» (alive None):
+    такое объявление показываем с пометкой, а не прячем. Снятые помечаются в базе как removed."""
+    from ..config import settings
+    from ..db import repo
+
+    ttl = settings.listing_check_ttl_min if max_age_min is None else max_age_min
+    budget = settings.listing_check_budget_s if budget_s is None else budget_s
+    out: dict[str, dict] = {}
+    if ttl > 0:
+        out.update(repo.record(repo.recent_page_checks, [x["id"] for x in items], ttl, default={}) or {})
+    todo = [x for x in items if x["id"] not in out]
+    if not todo:
+        return out
+    if cian.demo_mode():
+        for x in todo:
+            out[x["id"]] = {"alive": None, "note": "демо-режим: страницы не проверяются", "checked_at": None}
+        return out
+
+    async def one(x):
+        src = REGISTRY.get(x.get("source"), cian)
+        alive, note = await src.check_listing_page(x.get("url"))
+        repo.record(repo.save_page_check, x, alive, note)
+        out[x["id"]] = {"alive": alive, "note": note, "checked_at": repo.utcnow().isoformat() + "Z"}
+
+    tasks = [asyncio.create_task(one(x)) for x in todo]
+    done, pending = await asyncio.wait(tasks, timeout=budget)
+    for t in pending:
+        t.cancel()
+    for x in todo:
+        out.setdefault(x["id"], {"alive": None, "note": "площадка не ответила вовремя", "checked_at": None})
+    return out

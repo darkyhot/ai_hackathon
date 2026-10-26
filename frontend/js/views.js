@@ -250,6 +250,14 @@ const ON_SITE = { "Циан": "Циане" };
 const onSite = (name) => ON_SITE[name] || name;
 const SHORT = {};
 
+function pageCheck(p) {
+  if (!p || !p.note) return "";
+  if (p.alive === null && p.note.startsWith("демо")) return html`<p class="page-check">Демо: страница на Циане не проверяется</p>`;
+  const at = p.checked_at ? new Date(p.checked_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) : "";
+  if (p.alive) return html`<p class="page-check is-ok" title="${p.note}">✓ Объявление активно${at ? ` · проверено в ${at}` : ""}</p>`;
+  return html`<p class="page-check" title="${p.note}">Не удалось проверить, активно ли объявление (${p.note})</p>`;
+}
+
 function offerCard(c, vote) {
   const rooms = c.rooms === 0 ? "Студия" : `${c.rooms}-комн.`;
   const floor = c.floor ? `${c.floor}${c.floors ? `/${c.floors}` : ""} эт.` : "";
@@ -280,6 +288,7 @@ function offerCard(c, vote) {
       ${html.raw(where)}
       <p class="meta">${meta}</p>
       ${html.raw(params ? html`<p class="meta">${params}</p>` : "")}
+      ${html.raw(pageCheck(c.page))}
       ${html.raw(c.missing?.length ? html`<p class="missing">Нет в объявлении: ${c.missing.join(", ")} — уточню по телефону</p>` : "")}
     </div>
     <div class="offer-actions">
