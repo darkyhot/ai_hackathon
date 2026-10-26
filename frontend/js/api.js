@@ -24,4 +24,12 @@ export const api = {
   product: (sid, product, amount) => request(`/api/session/${sid}/product`, { method: "POST", body: { product, amount } }),
   economics: (params) => request(`/api/economics?${new URLSearchParams(params)}`),
   stream: (sid) => new EventSource(`/api/session/${sid}/stream`),
+  me: () => request("/api/me"),
+  history: () => request("/api/me/history"),
+  register: (data) => request("/api/auth/register", { method: "POST", body: data }),
+  login: (data) => request("/api/auth/login", { method: "POST", body: data }),
+  logout: () => request("/api/auth/logout", { method: "POST" }),
+  sberId: () => request("/api/auth/sberid"),
+  consent: () => request("/api/consent", { method: "POST" }),
+  security: (listingId, sid) => request(`/api/listing/${encodeURIComponent(listingId)}/security${sid ? `?sid=${sid}` : ""}`),
 };

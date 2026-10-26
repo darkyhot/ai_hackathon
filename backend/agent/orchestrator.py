@@ -15,7 +15,9 @@ from datetime import date
 from typing import Any
 
 from .. import economics, sources
+from ..db import repo
 from ..llm import LLMClient, LLMError
+from . import call_analytics as CA
 from . import finance as F
 from . import mortgage as M
 from . import negotiation as N
@@ -50,10 +52,22 @@ class Session:
     opened: dict[str, int] = field(default_factory=dict)
     journal: dict = field(default_factory=dict)
     llm_degraded: bool = False
+    visitor_id: str | None = None  # cookie посетителя — журнал пишется на него до регистрации
+    user_id: int | None = None
+    checks: dict[str, dict] = field(default_factory=dict)  # досье безопасности по id объявления (для окна проверки)
 
     # ------------------------------------------------------------- события
     async def emit(self, type_: str, **payload: Any) -> None:
         await self.events.put({"type": type_, **payload})
+        if type_ in ("done", "error"):
+            status = payload.get("status", "error")
+            repo.record(repo.update_agent_session, self.id, status=status, profile=_jsonable(self.profile) or None,
+                        result=_jsonable(self.journal) or None)
+            self.log("session_finished", {"status": status})
+
+    def log(self, type_: str, payload: dict | None = None) -> None:
+        """Записать событие в журнал посетителя (база). Ошибка базы агента не останавливает."""
+        repo.record(repo.log_event, type_, payload, self.visitor_id, self.user_id, self.id)
 
     async def step(self, n: int, status: str) -> None:
         if status == "active":
@@ -78,11 +92,13 @@ class Session:
         if not fut or fut.done():
             return False
         fut.set_result({"approved": approved, "data": data or {}})
+        self.log("confirm", {"kind": kind, "approved": approved, "data": _jsonable(data or {})})
         return True
 
     async def receive_text(self, text: str, marks: dict | None = None) -> str:
         """Текст клиента: ответ на уточнение, вопрос агенту, пожелание к подборке или заметка на потом."""
         await self.emit("message", role="user", text=text)
+        self.log("client_message", {"text": text, "stage": self.stage})
         if self.resolve("clarify", True, {"text": text}):
             return "answer"
         if qa.is_question(text):  # «что такое СБР?» — отвечаем, текущий шаг ждёт дальше
@@ -100,6 +116,7 @@ class Session:
         if product not in F.PRODUCTS:
             return
         self.opened[product] = int(amount)
+        self.log("product_opened", {"product": product, "amount": int(amount)})
         name = F.PRODUCTS[product]["name"]
         await self.emit("product_opened", product=product, amount=int(amount))
         await self.say(f"Готово: {name} на {T.fmt(amount)} (демо — в проде откроется в СберБанк Онлайн в один клик).")
@@ -108,10 +125,24 @@ class Session:
 SESSIONS: dict[str, Session] = {}
 
 
-def create_session(query: str, llm: LLMClient) -> Session:
-    s = Session(id=uuid.uuid4().hex[:12], query=query.strip(), llm=llm)
+def create_session(query: str, llm: LLMClient, visitor_id: str | None = None, user_id: int | None = None) -> Session:
+    s = Session(id=uuid.uuid4().hex[:12], query=query.strip(), llm=llm, visitor_id=visitor_id, user_id=user_id)
     SESSIONS[s.id] = s
+    repo.record(repo.start_agent_session, s.id, s.query, visitor_id, user_id, llm.name)
     return s
+
+
+def _jsonable(x: Any) -> Any:
+    """Для журнала: только то, что сериализуется в JSON, длинные тексты обрезаны."""
+    if isinstance(x, dict):
+        return {str(k): _jsonable(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple, set)):
+        return [_jsonable(v) for v in list(x)[:50]]
+    if isinstance(x, str):
+        return x[:2000]
+    if x is None or isinstance(x, (bool, int, float)):
+        return x
+    return str(x)[:200]
 
 
 # ------------------------------------------------------------- помощники
@@ -302,6 +333,7 @@ async def pipeline(s: Session) -> None:
         return
     if r["data"].get("budget_max"):
         profile["budget_max"] = int(r["data"]["budget_max"])
+    repo.record(repo.update_agent_session, s.id, profile=_jsonable(profile))
     await s.step(1, "done")
 
     # 2. Финансы — только то, что нужно этому клиенту: наличные / ипотека / накопить на взнос
@@ -363,6 +395,8 @@ async def pipeline(s: Session) -> None:
             await s.emit("done", status="saving")
             return
     await ask_housing(s, profile, progs)
+    repo.record(repo.save_finance_profile, s.visitor_id, s.user_id, profile, fin_inputs)
+    repo.record(repo.update_agent_session, s.id, profile=_jsonable(profile))
     await s.step(2, "done")
 
     # 3. Поиск (если ничего нет — предлагаем, что поменять, и ищем снова)
@@ -415,7 +449,8 @@ async def pipeline(s: Session) -> None:
     rows = [{"id": x["id"], "address": x["address"], "district": x.get("district"), "area": x["area"],
              "price": x["price"], **meta[x["id"]]["fair"]} for x in order[:8]]
     await s.emit("result", step=3, kind="search", data={"report": report, "total": len(listings), "matched": len(pool), "rows": rows})
-    src = ", ".join(f"{r['source']} — {r['count']}" + (" (сохранённый срез)" if r["status"] == "snapshot" else "")
+    s.log("search", {"report": _jsonable(report), "total": len(listings), "matched": len(pool)})
+    src = ", ".join(f"{r['source']} — {r['count']}" + {"snapshot": " (сохранённый срез)", "db": f" ({r['note']})"}.get(r["status"], "")
                     for r in report if r["status"] != "unavailable")
     down = [r["source"] for r in report if r["status"] == "unavailable"]
     if down:
@@ -456,6 +491,7 @@ async def pipeline(s: Session) -> None:
         batch = liked + fresh[:BATCH]
         shown |= {x["id"] for x in batch}
         s.shown = [card(x, meta) for x in batch]
+        repo.record(repo.save_marks, s.id, s.visitor_id, s.user_id, {"shown": [x["id"] for x in batch]})
         await s.emit("result", step=4, kind="selection", data={
             "round": round_no, "cards": s.shown, "liked": s.prefs.liked,
             "disliked": s.prefs.disliked, "learned": s.prefs.learned(), "remaining": len(fresh) - BATCH,
@@ -472,6 +508,8 @@ async def pipeline(s: Session) -> None:
             if parsed.get("budget_max"):
                 await s.say("Бюджет меняю только через «красные линии» — начните новый запрос, если он другой.")
         P.learn(s.prefs, by_id)
+        repo.record(repo.save_marks, s.id, s.visitor_id, s.user_id,
+                    {"like": s.prefs.liked, "dislike": s.prefs.disliked})
         if d.get("action") == "proceed":
             break
         learned = s.prefs.learned()
@@ -483,6 +521,9 @@ async def pipeline(s: Session) -> None:
     # 5. Проверка
     await s.step(5, "active")
     checks = {x["id"]: T.legal_check(x) for x in candidates}
+    s.checks.update(checks)
+    for x in candidates:
+        repo.record(repo.save_security, x, checks[x["id"]]["checks"] + checks[x["id"]]["before_deal"])
     await s.emit("result", step=5, kind="legal", data={"checks": list(checks.values()),
                                                          "listings": [card(x, meta) for x in candidates]})
     warned = [x for x in candidates if checks[x["id"]]["status"] == "warn"]
@@ -528,8 +569,17 @@ async def pipeline(s: Session) -> None:
                 end = ev
         if neg.used_fallback:
             await mark_degraded(s, LLMError("модель не ответила в звонке"))
+        facts, analytics = CA.analyze(neg.history, end["learned"], questions, listing, mode, end["status"], end["price"])
+        repo.record(repo.save_call, sid=s.id, visitor_id=s.visitor_id, user_id=s.user_id, listing=listing, mode=mode,
+                    seller_role=seller["role"], transcript=_jsonable(neg.history), status=end["status"],
+                    asking=listing["price"], agreed=end["price"] if end["status"] == "agreed" else None,
+                    viewing=end.get("viewing"), analytics=analytics, facts=facts)
+        await s.emit("call_facts", listing_id=listing["id"], facts=facts, summary=analytics)
         if end["learned"]:
-            await s.say("Узнал у продавца: " + "; ".join(f"{k} — {v}" for k, v in end["learned"].items()) + ".")
+            doubtful = [f for f in facts if f["level"] != "high" and f["key"] != "price_agreement"]
+            await s.say("Узнал у продавца: " + "; ".join(f"{k} — {v}" for k, v in end["learned"].items()) + "."
+                        + (" Перепроверю: " + "; ".join(f"{f['label']} ({f['reasons'][-1]})" for f in doubtful) + "."
+                           if doubtful else ""))
         price = end["price"]
         savings = listing["price"] - price
         over_budget = price > profile["budget_max"]
@@ -586,6 +636,8 @@ async def pipeline(s: Session) -> None:
         contract = ("договор уступки прав по ДДУ" if "уступк" in (listing.get("sale_type") or "")
                     else "договор участия в долевом строительстве (ДДУ)" if listing.get("is_new") else "договор купли-продажи")
         r = await s.ask("sign", "Подписание договора", f"Подписать {contract} электронной подписью?")
+        repo.record(repo.save_deal, sid=s.id, visitor_id=s.visitor_id, user_id=s.user_id, listing=listing,
+                    final_price=price, plan=_jsonable(plan), status="signed" if r["approved"] else "draft")
         if not r["approved"]:
             await s.say("Подписание отложено. Все документы сохранены — вернёмся, когда будете готовы.")
             await s.emit("done", status="paused")

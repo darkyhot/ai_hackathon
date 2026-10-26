@@ -1,4 +1,5 @@
 // Экран звонка: счётчик цены, «линейка» коридора и расшифровка разговора.
+import { factRow } from "./security.js";
 import { el, html, rub } from "./format.js";
 import { bindMic, mic, recorder } from "./voice.js";
 
@@ -110,11 +111,22 @@ function phaseClass(c, k, order) {
 function learnedMarkup(c) {
   if (!c.ended || (!c.viewing && !c.learned)) return "";
   const facts = Object.entries(c.learned || {});
+  const analyzed = c.facts?.length
+    ? html`<ul class="call-facts">${html.raw(c.facts.map(factRow).join(""))}</ul>
+      ${html.raw(c.summary ? html`<p class="hint">Речевая аналитика: оговорок — ${c.summary.hedged}, расхождений с объявлением — ${c.summary.contradictions}, смен ответа — ${c.summary.changed}. Факты сохранены с уровнем доверия; сомнительные перепроверю по документам.</p>` : "")}`
+    : facts.length ? html`<dl>${html.raw(facts.map(([k, v]) => html`<dt>${k}</dt><dd>${v}</dd>`).join(""))}</dl>` : html`<p class="hint">Продавец не ответил на вопросы — уточню позже.</p>`;
   return html`<div class="learned-box">
     <h3>Что агент узнал</h3>
-    ${html.raw(facts.length ? html`<dl>${html.raw(facts.map(([k, v]) => html`<dt>${k}</dt><dd>${v}</dd>`).join(""))}</dl>` : html`<p class="hint">Продавец не ответил на вопросы — уточню позже.</p>`)}
+    ${html.raw(analyzed)}
     ${html.raw(c.viewing ? html`<p class="viewing-slot">Просмотр: <b>${c.viewing}</b></p>` : "")}
   </div>`;
+}
+
+export function showFacts(c, facts, summary) {
+  c.facts = facts;
+  c.summary = summary;
+  const slot = q(c, "[data-learned]");
+  if (slot) slot.innerHTML = learnedMarkup(c);
 }
 
 export function setPhase(c, phase) {

@@ -194,7 +194,7 @@ function mortgage(m) {
 // ------------------------------------------------------------------ поиск и цена
 
 function sourceChip(r) {
-  const label = { live: "живые данные", cached: "кеш сессии", snapshot: "сохранённый срез", demo: "демо-срез", static: "сохранённые", unavailable: "недоступен" }[r.status] || r.status;
+  const label = { live: "живые данные", cached: "кеш сессии", db: "из базы", snapshot: "сохранённый срез", demo: "демо-срез", static: "сохранённые", unavailable: "недоступен" }[r.status] || r.status;
   const cls = r.status === "unavailable" ? "tag-red" : ["snapshot", "demo", "static"].includes(r.status) ? "tag-amber" : "tag-green";
   return html`<span class="source-chip"><b>${r.source}</b> ${r.count} ${plural(r.count, "объявление", "объявления", "объявлений")} <span class="tag ${cls}">${label}</span></span>`;
 }
@@ -318,11 +318,12 @@ export function legal(d) {
   const cards = d.checks.map((c) => {
     const l = byId[c.listing_id];
     const tag = c.status === "warn" ? html`<span class="tag tag-amber">есть оговорки</span>` : html`<span class="tag tag-green">по объявлению без тревог</span>`;
-    const listingRows = c.checks.map((k) => html`<li><span class="ic ${CHECK_ICON[k.status] || "ic-info"}"></span><span><b>${k.title}:</b> ${k.note}</span></li>`).join("");
+    const open = (item) => html`data-security="${c.listing_id}" data-item="${item}" data-title="${l.address}" role="button" tabindex="0" title="Подробнее: как проверено и как проверить самому"`;
+    const listingRows = c.checks.map((k, i) => html`<li class="sec-click" ${html.raw(open(`a${i}`))}><span class="ic ${CHECK_ICON[k.status] || "ic-info"}"></span><span><b>${k.title}:</b> ${k.note}</span><span class="sec-more-ic" aria-hidden="true">›</span></li>`).join("");
     const dealRows = c.before_deal.map((k) => {
       const [cls, label] = DEAL_STATUS[k.status] || DEAL_STATUS.not_checked;
       return html`
-        <li class="${k.priority ? "is-priority" : ""}">
+        <li class="sec-click ${k.priority ? "is-priority" : ""}" ${html.raw(open(`r-${k.key}`))}>
           <div class="sec-main"><b>${k.title}</b><span class="sec-src">${k.source}</span></div>
           <p class="sec-shows">${k.shows}</p>
           ${html.raw(k.priority ? html`<p class="sec-why">Важно здесь: ${k.why}</p>` : "")}
@@ -353,7 +354,7 @@ export function legal(d) {
   return html`
   <section class="panel">
     <h2 class="panel-title">Проверка безопасности</h2>
-    <p class="panel-lead">Что видно по объявлению — проверено. Реестры агент закажет после выбора квартиры, до задатка; пока выписок нет, он не пишет «чисто». Пункты с пометкой «важно здесь» — то, на что указывает само объявление.</p>
+    <p class="panel-lead">Что видно по объявлению — проверено. Реестры агент закажет после выбора квартиры, до задатка; пока выписок нет, он не пишет «чисто». Нажмите на любой пункт — покажу, как проверял, доказательства и как проверить самому.</p>
     <div class="security-list">${html.raw(cards.join(""))}</div>
     <p class="hint">В прототипе реестры не подключены. В продукте Домклик запросит выписку ЕГРН, ФССП, ЕФРСБ и ЕИСЖС автоматически, а нетиповые случаи передаст юристу.</p>
   </section>`;

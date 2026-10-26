@@ -32,6 +32,52 @@ NEW_BUILD = [
     ("commissioning", "Ввод в эксплуатацию", "ЕИСЖС, Росреестр", "для сданного дома: разрешение на ввод и право собственности"),
 ]
 
+# Как проверить самому: официальный сервис и что там сделать. Ссылки — на корневые страницы сервисов.
+SELF_CHECK = {
+    "egrn": ("Росреестр / Госуслуги", "https://rosreestr.gov.ru/",
+             "Закажите выписку ЕГРН об объекте по адресу или кадастровому номеру (на Госуслугах — «Выписка из ЕГРН»)."),
+    "history": ("Росреестр / Госуслуги", "https://rosreestr.gov.ru/",
+                "Закажите выписку о переходе прав: видно всех прошлых собственников и основания (купля, дарение, наследство)."),
+    "seller_debts": ("ФССП — банк исполнительных производств", "https://fssp.gov.ru/iss/ip",
+                     "Введите ФИО и дату рождения продавца из паспорта: долги могут привести к аресту квартиры."),
+    "bankruptcy": ("Федресурс (ЕФРСБ)", "https://bankrot.fedresurs.ru/",
+                   "Найдите продавца по ФИО или ИНН: нет ли дела о банкротстве."),
+    "courts": ("ГАС «Правосудие»", "https://sudrf.ru/",
+               "Поиск по ФИО продавца и адресу квартиры в судах района."),
+    "passport": ("Госуслуги — проверка паспорта", "https://www.gosuslugi.ru/",
+                 "Сервис проверки действительности паспорта (перенесён с сайта МВД на Госуслуги): серия и номер."),
+    "children": ("Соцфонд, органы опеки", "https://sfr.gov.ru/",
+                 "Спросите у продавца справку об остатке маткапитала; если он использован — нужны доли детей и разрешение опеки."),
+    "registered": ("Выписка из домовой книги (МФЦ, Госуслуги)", "https://www.gosuslugi.ru/",
+                   "Продавец заказывает выписку о зарегистрированных; все должны выписаться до сделки."),
+    "replanning": ("Техплан + просмотр", None,
+                   "Сверьте планировку на просмотре с техпланом или поэтажным планом из БТИ."),
+    "poa": ("Реестр доверенностей Федеральной нотариальной палаты", "https://www.reestr-dover.ru/",
+            "Введите номер доверенности и данные нотариуса: действует ли она и не отозвана ли."),
+    "permit": ("ЕИСЖС — наш.дом.рф", "https://наш.дом.рф/",
+               "Найдите ЖК: разрешение на строительство и проектная декларация, сроки и характеристики дома."),
+    "escrow": ("ЕИСЖС — наш.дом.рф, банк", "https://наш.дом.рф/",
+               "В карточке дома — банк, где открываются эскроу-счета; деньги лежат там до сдачи."),
+    "developer": ("ЕГРЮЛ, Федресурс, суды", "https://egrul.nalog.ru/",
+                  "Проверьте застройщика по ИНН: статус, банкротство на Федресурсе, крупные иски."),
+    "deadline": ("ЕИСЖС — наш.дом.рф", "https://наш.дом.рф/",
+                 "В карточке дома — плановый срок и история переносов."),
+    "contract": ("ДДУ и Росреестр", "https://rosreestr.gov.ru/",
+                 "ДДУ должен быть зарегистрирован в Росреестре; при уступке — вся цепочка договоров и согласие застройщика."),
+    "commissioning": ("ЕИСЖС, Росреестр", "https://наш.дом.рф/",
+                      "Разрешение на ввод дома в эксплуатацию и право собственности в ЕГРН."),
+}
+
+# Почему агенту можно доверять: принципы, которые видит клиент в окне проверки
+TRUST = [
+    "Не пишу «чисто» без выписки: пока нет документа, статус — «не проверено».",
+    "У каждого вывода — источник: поле объявления, цитата продавца или реестр, со ссылкой.",
+    "Слова продавца — не документ: у каждого факта из звонка есть уверенность и чем его подтвердить.",
+    "Цены считаю кодом по реальным объявлениям, а не моделью; вы видите, из чего сложилась справедливая цена.",
+    "Деньги — только через сервис безопасных расчётов после регистрации права.",
+    "Любую проверку можно повторить самому — ссылки на официальные сервисы ниже.",
+]
+
 # слово в описании -> какую проверку поднять и почему
 TRIGGERS = [
     (r"\bдол(я|и|ю|ей)\b", "egrn", "в описании упомянута доля"),
@@ -46,33 +92,65 @@ TRIGGERS = [
 ]
 
 
+def _quote_around(text: str, pattern: str, width: int = 90) -> str | None:
+    m = re.search(pattern, text, re.I)
+    if not m:
+        return None
+    a, b = max(0, m.start() - width), min(len(text), m.end() + width)
+    return ("…" if a else "") + text[a:b].replace("\n", " ").strip() + ("…" if b < len(text) else "")
+
+
 def _listing_checks(listing: dict) -> list[dict]:
-    """Что видно по самому объявлению (это и есть «проверено» в прототипе)."""
-    from ..sources import description_flags
+    """Что видно по самому объявлению (это и есть «проверено» в прототипе). У каждого пункта — доказательство."""
+    from ..sources.base import DESCRIPTION_FLAGS
 
     out = []
+    site = listing.get("source_name") or "площадка"
+    url = listing.get("url")
 
-    def add(title, status, note):
-        out.append({"title": title, "status": status, "note": note})
+    def add(key, title, status, note, method, evidence):
+        out.append({"key": key, "title": title, "status": status, "note": note, "method": method,
+                    "source": site, "source_url": url, "evidence": evidence})
 
     rr = listing.get("rosreestr_checked")
+    field = {"label": "Отметка площадки «Проверено в Росреестре»", "value": "есть" if rr else "нет"}
     if rr:
-        add("Собственник", "ok", "площадка сверила собственника с Росреестром")
+        add("owner", "Собственник", "ok", "площадка сверила собственника с Росреестром",
+            "Площадка сверяет ФИО продавца с ЕГРН и ставит отметку в объявлении. Это не полная выписка: "
+            "доли, обременения и история не видны.", [field])
     else:
-        add("Собственник", "info", "площадка собственника не сверяла")
+        add("owner", "Собственник", "info", "площадка собственника не сверяла",
+            "Отметки о сверке с Росреестром нет — собственника проверим по выписке ЕГРН.", [field])
     if listing.get("is_apartments"):
-        add("Апартаменты", "warn", "не жильё: нельзя прописаться, ипотека сложнее")
+        add("apartments", "Апартаменты", "warn", "не жильё: нельзя прописаться, ипотека сложнее",
+            "Поле объявления «Апартаменты».", [{"label": "Тип недвижимости в объявлении", "value": "апартаменты"}])
     if listing.get("is_auction"):
-        add("Продажа с торгов", "warn", "особый порядок сделки — нужен юрист")
+        add("auction", "Продажа с торгов", "warn", "особый порядок сделки — нужен юрист",
+            "Поле объявления «Продажа с торгов».", [{"label": "Формат продажи", "value": "торги"}])
     if listing.get("is_new"):
         if listing.get("sale_type"):
-            add("Тип договора", "ok" if "ДДУ" in listing["sale_type"] else "info", listing["sale_type"])
+            add("sale_type", "Тип договора", "ok" if "ДДУ" in listing["sale_type"] else "info", listing["sale_type"],
+                "Поле объявления «Тип продажи». ДДУ по 214-ФЗ — деньги на эскроу, самый защищённый вариант.",
+                [{"label": "Тип продажи", "value": listing["sale_type"]}])
         if listing.get("deadline"):
-            add("Срок сдачи", "ok" if listing.get("finished") else "info", listing["deadline"])
-    for note in description_flags(listing.get("description")):
-        add("Описание", "warn", note)
-    if not any(c["status"] == "warn" for c in out):
-        add("Описание", "ok", "тревожных слов нет")
+            add("deadline_ad", "Срок сдачи", "ok" if listing.get("finished") else "info", listing["deadline"],
+                "Срок из объявления. Переносы видно только в ЕИСЖС — проверим до сделки.",
+                [{"label": "Срок сдачи в объявлении", "value": listing["deadline"]}]
+                + ([{"label": "Застройщик", "value": listing["developer"]}] if listing.get("developer") else []))
+    text = listing.get("description") or ""
+    flagged = False
+    for pattern, note in DESCRIPTION_FLAGS:
+        quote = _quote_around(text, pattern)
+        if quote:
+            flagged = True
+            add("description", "Описание", "warn", note,
+                "Ищу в тексте объявления слова-сигналы: доля, дети, наследство, перепланировка, обременение, переуступка.",
+                [{"label": "Цитата из описания", "value": quote}])
+    if not flagged:
+        add("description", "Описание", "ok", "тревожных слов нет",
+            "Проверил текст объявления на слова-сигналы: доля, дети, наследство, перепланировка, обременение, "
+            "переуступка, альтернатива — не нашёл.",
+            [{"label": "Длина описания", "value": f"{len(text)} символов"}])
     return out
 
 
@@ -99,8 +177,15 @@ def dossier(listing: dict) -> dict:
         status, note = "not_checked", None
         if key == "egrn" and listing.get("rosreestr_checked"):
             status, note = "partial", "площадка сверила собственника; полную выписку всё равно закажу"
+        svc, svc_url, how = SELF_CHECK.get(key, (source, None, ""))
         items.append({"key": key, "title": title, "source": source, "shows": shows, "status": status,
-                      "note": note, "priority": key in flagged, "why": flagged.get(key)})
+                      "note": note, "priority": key in flagged, "why": flagged.get(key),
+                      "method": f"Источник — {source}. В прототипе реестры не подключены — выписку закажу до сделки "
+                                "(в проде — автоматически, с согласия продавца).",
+                      "self_check": {"service": svc, "url": svc_url, "how": how},
+                      "evidence": ([{"label": "Почему важно здесь", "value": flagged[key]}] if key in flagged else [])
+                      + ([{"label": "Отметка площадки", "value": "собственник сверен с Росреестром"}]
+                         if status == "partial" else [])})
     items.sort(key=lambda x: (not x["priority"], 0))
 
     checks = _listing_checks(listing)
@@ -114,6 +199,7 @@ def dossier(listing: dict) -> dict:
         "before_deal": items,
         "done": done,
         "total": len(items),
+        "trust": TRUST,
         "summary": (f"По объявлению {'есть оговорки' if warn else 'тревожных признаков нет'}. "
                     f"До сделки — {len(items)} {_plural(len(items))} по реестрам, пока не проверено ни одной."),
     }

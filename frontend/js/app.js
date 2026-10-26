@@ -1,11 +1,13 @@
 // Контроллер: SSE-события агента -> чат, степпер, панели этапов.
 import { api } from "./api.js";
-import { addGuard, addLine, createCall, renderCall, setPhase, setStatus, setTyping, showLearned, showSellerInput, updatePrices } from "./call.js";
+import { addGuard, addLine, createCall, renderCall, setPhase, setStatus, setTyping, showFacts, showLearned, showSellerInput, updatePrices } from "./call.js";
 import { savingsChart } from "./chart.js";
 import { mountEconomics } from "./economics.js";
 import { el, html, rub, sleep } from "./format.js";
 import * as V from "./views.js";
 import { bindMic, recorder, voice } from "./voice.js";
+import { initAccount } from "./account.js";
+import { openSecurity } from "./security.js";
 
 const STEPS = ["Запрос", "Финансы", "Поиск", "Подбор", "Проверка", "Звонок", "Просмотр", "Сделка", "Итог"];
 
@@ -303,6 +305,9 @@ async function handle(ev, myGen) {
       setStatus(call, ev.status === "agreed" ? "Звонок завершён · договорились" : "Звонок завершён · ждём вашего решения", true);
       showLearned(call, ev.learned, ev.viewing);
       break;
+    case "call_facts":
+      if (call) showFacts(call, ev.facts, ev.summary);
+      break;
     case "done": finish(ev.status); break;
     case "error": addMsg("error", ev.text); finish("error"); break;
   }
@@ -458,7 +463,19 @@ bindMic($("micBtn"), $("query"), {
 });
 $("micBtn").hidden = false;
 
+function securityClick(e) {
+  const item = e.target.closest("[data-security]");
+  if (!item || e.target.closest("a")) return false;
+  openSecurity(item.dataset.security, item.dataset.item, state.sid, `Проверка: ${item.dataset.title}`);
+  return true;
+}
+
+stage.addEventListener("keydown", (e) => {
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches("[data-security]")) { e.preventDefault(); securityClick(e); }
+});
+
 stage.addEventListener("click", async (e) => {
+  if (securityClick(e)) return;
   const ex = e.target.closest("[data-example]");
   if (ex) return start(ex.dataset.example);
 
@@ -521,6 +538,8 @@ document.querySelectorAll(".tab").forEach((tab) =>
 addMsg("agent", "Здравствуйте! Я агент покупки квартиры. Расскажите текстом или голосом, что ищете: город, бюджет, комнаты и что для вас важно.");
 setComposer();
 renderStage();
+initAccount();
+
 api.health().then((h) => {
   cities = h.cities || [];
   recorder.available = Boolean(h.stt?.installed && h.stt.status !== "error");
