@@ -238,6 +238,8 @@ def normalize(o: dict, city: str, today: date | None = None, new: bool = False) 
         "days_on_market": days,
         "metro": metro,
         "photo": photo,
+        "photos": [u for u in ((p.get("fullUrl") or p.get("thumbnail2Url")) for p in photos[:20]) if u],
+        "published_at": created.isoformat() if days is not None else None,
         "description": (o.get("description") or "")[:1500],
         "rosreestr_checked": bool(o.get("isRosreestrChecked")) if o.get("isRosreestrChecked") is not None else None,
         "is_apartments": bool(o.get("isApartments")),
@@ -416,6 +418,28 @@ async def search(city: str, rooms: int, budget: int | None, page: int = 1, okrug
         if saved:
             return saved, {"status": "snapshot", "note": f"{exc}; сохранённый срез от {fetched_at}"}
         raise
+
+
+async def fetch_live(city: str, rooms: int, budget: int | None, page: int = 1, okrug: str | None = None,
+                     new: bool = False) -> list[dict]:
+    """Только живая выдача, без кеша и срезов — для ежедневного обхода (workers/refresh.py)."""
+    if not supported(city):
+        raise SourceUnavailable(f"для города «{city}» площадка не подключена")
+    listings, _ = await _fetch_page(city, rooms, budget, page, okrug, new)
+    return listings
+
+
+def is_end_of_results(exc: SourceUnavailable, page: int) -> bool:
+    """Циан отвечает редиректом (не на капчу), когда страниц больше нет."""
+    return page > 1 and "ответ 30" in str(exc)
+
+
+async def check_listing_page(url: str | None) -> bool | None:
+    """ЗАГЛУШКА: открыть страницу объявления и понять, снято ли оно (True — живо, False — снято, None — не знаем).
+
+    Нужна, чтобы не снимать объявление, которое просто ушло ниже первых страниц выдачи.
+    Пока None: решение принимается по числу обходов подряд без объявления (REMOVE_AFTER_MISSES)."""
+    return None
 
 
 async def market(city: str, rooms: int, okrug: str | None = None, new: bool = False) -> dict | None:

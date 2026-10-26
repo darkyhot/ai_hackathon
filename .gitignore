@@ -19,3 +19,8 @@ backend/data/cache/
 
 # локальные модели (Whisper и т.п.)
 models/
+
+# база данных и скачанные фото (создаются при запуске)
+backend/data/*.db
+backend/data/*.db-*
+backend/data/photos/

@@ -1,4 +1,6 @@
 """Склейка дублей (sources/dedup.py) — механизм на будущее, когда площадок станет больше одной."""
+import os
+os.environ.setdefault("DATABASE_URL", "sqlite://")  # тесты не трогают рабочую базу
 import unittest
 
 from backend.sources import dedup

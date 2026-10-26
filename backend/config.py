@@ -16,6 +16,11 @@ def _bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    return int(value) if value and value.strip() else default
+
+
 @dataclass(frozen=True)
 class Settings:
     llm_provider: str = os.getenv("LLM_PROVIDER", "deepseek").strip().lower()
@@ -30,16 +35,31 @@ class Settings:
     deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
     gigachat_credentials: str = os.getenv("GIGACHAT_CREDENTIALS", "")
-    gigachat_scope: str = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
-    gigachat_model: str = os.getenv("GIGACHAT_MODEL", "GigaChat-2-Max")
-    gigachat_auth_url: str = os.getenv(
-        "GIGACHAT_AUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-    )
-    gigachat_base_url: str = os.getenv(
-        "GIGACHAT_BASE_URL", "https://gigachat.devices.sberbank.ru/api/v1"
-    )
+    gigachat_scope: str = os.getenv("GIGACHAT_SCOPE") or "GIGACHAT_API_PERS"
+    gigachat_model: str = os.getenv("GIGACHAT_MODEL") or "GigaChat-2-Max"
+    gigachat_auth_url: str = os.getenv("GIGACHAT_AUTH_URL") or "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+    gigachat_base_url: str = os.getenv("GIGACHAT_BASE_URL") or "https://api.giga.chat/v1"
     gigachat_verify_ssl: bool = _bool("GIGACHAT_VERIFY_SSL", True)
     gigachat_ca_bundle: str = os.getenv("GIGACHAT_CA_BUNDLE", "")
+
+    # База данных: SQLite по умолчанию; для PostgreSQL — postgresql+psycopg://user:pass@host/db
+    database_url: str = os.getenv("DATABASE_URL") or f"sqlite:///{ROOT / 'backend' / 'data' / 'app.db'}"
+    # Сколько часов сохранённая выдача считается свежей (не ходим на площадку заново)
+    listings_fresh_hours: int = _int("LISTINGS_FRESH_HOURS", 24)
+    # Ежедневный обход объявлений: время «ЧЧ:ММ» (пусто — выключен в процессе сервера; есть отдельный воркер)
+    refresh_at: str = os.getenv("REFRESH_AT", "")
+    refresh_pages: int = _int("REFRESH_PAGES", 3)
+    # Сколько обходов подряд объявления нет в выдаче, прежде чем считать его снятым
+    remove_after_misses: int = _int("REMOVE_AFTER_MISSES", 2)
+    # Скачивать фото квартир на диск (иначе храним только ссылки)
+    store_photos: bool = _bool("STORE_PHOTOS", False)
+    photos_dir: str = os.getenv("PHOTOS_DIR") or str(ROOT / "backend" / "data" / "photos")
+
+    # Пользователи: срок жизни входа и почты администраторов (через запятую)
+    auth_session_days: int = _int("AUTH_SESSION_DAYS", 30)
+    admin_emails: str = os.getenv("ADMIN_EMAILS", "")
+    # Cookie с флагом Secure (включить за HTTPS)
+    cookie_secure: bool = _bool("COOKIE_SECURE", False)
 
 
 settings = Settings()

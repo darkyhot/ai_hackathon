@@ -3,6 +3,8 @@
 
 Запуск: .venv/bin/python -m unittest tests.test_mortgage -v
 """
+import os
+os.environ.setdefault("DATABASE_URL", "sqlite://")  # тесты не трогают рабочую базу
 import asyncio
 import unittest
 

@@ -2,6 +2,8 @@
 
 Запуск: .venv/bin/python -m unittest tests.test_qa_demo -v
 """
+import os
+os.environ.setdefault("DATABASE_URL", "sqlite://")  # тесты не трогают рабочую базу
 import asyncio
 import unittest
 from unittest import mock
