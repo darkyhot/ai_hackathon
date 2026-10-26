@@ -1,8 +1,9 @@
 """Источники объявлений. Агент вызывает collect() и не знает деталей площадок.
 
-Подключены Циан и Домклик (список — переменная SOURCES в .env, по умолчанию «cian,domclick»).
-Площадки опрашиваются параллельно; одна и та же квартира с разных сайтов склеивается
-в одну карточку со списком площадок и цен (dedup.py). У каждой площадки свой путь отката:
+Сейчас подключён Циан (список — переменная SOURCES в .env). Механизм готов к нескольким
+площадкам: они опрашиваются параллельно, а одна и та же квартира с разных сайтов склеивается
+в одну карточку со списком площадок и цен (dedup.py). Новая площадка — модуль с search(),
+load_snapshot(), supported(), SOURCE, SOURCE_NAME и запись в REGISTRY. У каждой площадки свой путь отката:
 живой запрос -> кеш сессии -> сохранённый срез (тоже реальные объявления).
 Синтетики нет: если данных нет, агент так и говорит.
 """
@@ -10,14 +11,13 @@ from __future__ import annotations
 
 import asyncio
 
-from . import cian, dedup, domclick
+from . import cian, dedup
 from .base import SourceUnavailable, description_flags, normalize_city
-from .static import avito, yandex
 
 __all__ = ["collect", "markets", "more", "comparables", "market", "enabled", "names", "normalize_city",
-           "description_flags", "SourceUnavailable", "cian", "domclick", "dedup", "SUPPORTED_CITIES"]
+           "description_flags", "SourceUnavailable", "cian", "dedup", "SUPPORTED_CITIES"]
 
-REGISTRY = {"cian": cian, "domclick": domclick, "avito": avito, "yandex": yandex}
+REGISTRY = {"cian": cian}
 SUPPORTED_CITIES = list(cian.REGIONS)
 
 

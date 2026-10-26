@@ -20,7 +20,7 @@ export function welcome(cities = []) {
     <div class="examples">
       ${html.raw(EXAMPLES.map((e) => html`<button class="example" data-example="${e}">${e}</button>`).join(""))}
     </div>
-    <p class="hint">Объявления — с Циана, Домклика, Авито и Яндекс Недвижимости${cities.length ? `: ${cities.join(", ")}` : ""}. Одна и та же квартира с разных сайтов — одна карточка.</p>
+    <p class="hint">Объявления — с Циана${cities.length ? `: ${cities.join(", ")}` : ""}.</p>
   </section>`;
 }
 
@@ -245,10 +245,10 @@ function metroText(m) {
   return `м. ${m.name || ""} ${m.minutes} мин ${m.mode}`.replace("  ", " ");
 }
 
-// «на Циане», «на Домклике», «на Авито», «на Яндекс Недвижимости»
-const ON_SITE = { "Циан": "Циане", "Домклик": "Домклике", "Яндекс Недвижимость": "Яндекс Недвижимости" };
+// «на Циане» — для карточек, собранных с нескольких площадок (склейка дублей, sources/dedup.py)
+const ON_SITE = { "Циан": "Циане" };
 const onSite = (name) => ON_SITE[name] || name;
-const SHORT = { "Яндекс Недвижимость": "Яндекс" };
+const SHORT = {};
 
 function offerCard(c, vote) {
   const rooms = c.rooms === 0 ? "Студия" : `${c.rooms}-комн.`;
