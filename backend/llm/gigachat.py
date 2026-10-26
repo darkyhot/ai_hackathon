@@ -7,6 +7,11 @@
   (arguments — уже объект, а не строка);
 - нет response_format: JSON просим в системном промпте;
 - сертификат НУЦ Минцифры: укажите GIGACHAT_CA_BUNDLE или GIGACHAT_VERIFY_SSL=false.
+
+Адреса (документация GigaChat API):
+  токен  POST https://ngw.devices.sberbank.ru:9443/api/v2/oauth  (Basic <ключ авторизации>, RqUID, scope)
+  API    https://api.giga.chat/v1  (/models, /chat/completions; Bearer <токен>, токен живёт 30 минут)
+Проверка ключа: python -m backend.llm.check
 """
 from __future__ import annotations
 
@@ -65,7 +70,8 @@ class GigaChatClient(LLMClient):
         if not credentials:
             raise LLMError("GIGACHAT_CREDENTIALS не задан")
         self.model = model
-        self._credentials = credentials
+        # ключ авторизации из личного кабинета; если вставили вместе со словом «Basic» — убираем его
+        self._credentials = credentials.strip().removeprefix("Basic ").strip()
         self._scope = scope
         self._auth_url = auth_url
         verify: bool | str = ca_bundle or verify_ssl
@@ -95,6 +101,18 @@ class GigaChatClient(LLMClient):
         # expires_at приходит в миллисекундах
         self._token_expires_at = float(data.get("expires_at", 0)) / 1000 or time.time() + 1700
         return self._token
+
+    async def models(self) -> list[str]:
+        """GET /models — список доступных моделей (заодно проверка ключа и токена)."""
+        for _ in range(2):
+            token = await self._get_token()
+            r = await self._http.get("/models", headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+            if r.status_code != 401:
+                break
+            self._token = None
+        if r.status_code != 200:
+            raise LLMError(f"GigaChat /models {r.status_code}: {r.text[:300]}")
+        return [m.get("id") for m in r.json().get("data", [])]
 
     async def chat(
         self,

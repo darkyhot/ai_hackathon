@@ -3,6 +3,8 @@
 
 Запуск: .venv/bin/python -m unittest discover -s tests -v
 """
+import os
+os.environ.setdefault("DATABASE_URL", "sqlite://")  # тесты не трогают рабочую базу
 import asyncio
 import json
 import unittest
@@ -42,9 +44,9 @@ class GigaChatAdapterTest(unittest.TestCase):
         c = GigaChatClient(
             credentials="Y2xpZW50OnNlY3JldA==", scope="GIGACHAT_API_PERS", model="GigaChat-2-Max",
             auth_url="https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
-            base_url="https://gigachat.devices.sberbank.ru/api/v1",
+            base_url="https://api.giga.chat/v1",
         )
-        c._http = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://gigachat.devices.sberbank.ru/api/v1")
+        c._http = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.giga.chat/v1")
         return c
 
     def test_tools_become_functions_and_token_is_cached(self):
@@ -81,6 +83,30 @@ class GigaChatAdapterTest(unittest.TestCase):
 
         self.assertEqual(run(self.make_client(handler).chat([{"role": "user", "content": "hi"}])).text, "ok")
         self.assertEqual(state["oauth"], 2)
+
+    def test_models_and_basic_prefix_stripped(self):
+        seen = {}
+
+        def handler(req):
+            if req.url.path.endswith("/oauth"):
+                seen["auth"] = req.headers["Authorization"]
+                seen["scope"] = req.content.decode()
+                self.assertTrue(req.headers["RqUID"])
+                return httpx.Response(200, json={"access_token": "tok", "expires_at": 4102444800000})
+            seen["url"] = str(req.url)
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "GigaChat"}, {"id": "GigaChat-2-Max"}]})
+
+        c = GigaChatClient(credentials="Basic Y2xpZW50OnNlY3JldA==", scope="GIGACHAT_API_PERS", model="GigaChat-2-Max",
+                           auth_url="https://ngw.devices.sberbank.ru:9443/api/v2/oauth", base_url="https://api.giga.chat/v1")
+        c._http = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.giga.chat/v1")
+        self.assertEqual(run(c.models()), ["GigaChat", "GigaChat-2-Max"])
+        self.assertEqual(seen["auth"], "Basic Y2xpZW50OnNlY3JldA==")
+        self.assertEqual(seen["scope"], "scope=GIGACHAT_API_PERS")
+        self.assertEqual(seen["url"], "https://api.giga.chat/v1/models")
+
+    def test_default_api_address(self):
+        from backend.config import Settings
+        self.assertEqual(Settings.gigachat_base_url, "https://api.giga.chat/v1")
 
     def test_json_mode_adds_instruction(self):
         msgs = to_gigachat_messages([{"role": "system", "content": "Ты агент"}], json_mode=True)
