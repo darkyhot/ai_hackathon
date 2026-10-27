@@ -20,7 +20,7 @@ export function welcome(cities = []) {
     <div class="examples">
       ${html.raw(EXAMPLES.map((e) => html`<button class="example" data-example="${e}">${e}</button>`).join(""))}
     </div>
-    <p class="hint">Объявления — с Циана${cities.length ? `: ${cities.join(", ")}` : ""}.</p>
+    <p class="hint">Объявления — с Циана${cities.length ? `: ${cities.slice(0, 7).join(", ")}${cities.length > 7 ? ` и ещё ${cities.length - 7} городов` : ""}` : ""}.</p>
   </section>`;
 }
 

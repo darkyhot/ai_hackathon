@@ -541,7 +541,7 @@ renderStage();
 initAccount();
 
 api.health().then((h) => {
-  cities = h.cities || [];
+  cities = [...(h.featured_cities || []), ...(h.cities || []).filter((c) => !(h.featured_cities || []).includes(c))];
   recorder.available = Boolean(h.stt?.installed && h.stt.status !== "error");
   setProvider(h);
   if (h.demo) {

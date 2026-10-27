@@ -15,10 +15,11 @@ from . import cian, dedup
 from .base import SourceUnavailable, description_flags, normalize_city
 
 __all__ = ["collect", "markets", "more", "comparables", "market", "enabled", "names", "normalize_city",
-           "description_flags", "SourceUnavailable", "cian", "dedup", "SUPPORTED_CITIES"]
+           "description_flags", "SourceUnavailable", "cian", "dedup", "SUPPORTED_CITIES", "FEATURED_CITIES"]
 
 REGISTRY = {"cian": cian}
 SUPPORTED_CITIES = list(cian.REGIONS)
+FEATURED_CITIES = cian.VERIFIED_CITIES  # проверены на живом Циане — их предлагаем кнопками
 
 
 def enabled(city: str | None = None) -> list:

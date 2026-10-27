@@ -151,7 +151,12 @@ def _jsonable(x: Any) -> Any:
 async def mark_degraded(s: Session, exc: Exception) -> None:
     if not s.llm_degraded and s.llm.name != "offline":
         s.llm_degraded = True
-        await s.emit("provider", provider=s.llm.name, model=s.llm.model, degraded=True, reason=str(exc)[:160])
+        reason = str(exc)
+        if " 401" in reason or "Authentication" in reason:
+            reason = f"ключ {s.llm.name} не подошёл (401) — проверьте ключ в .env"
+        await s.emit("provider", provider=s.llm.name, model=s.llm.model, degraded=True, reason=reason[:160])
+        await s.emit("message", role="note", text=f"Модель {s.llm.name} не ответила ({reason[:120]}). "
+                                                   "Продолжаю по правилам: разбор запроса и звонок проще, расчёты те же.")
 
 
 async def parse_request(s: Session, text: str, base: dict | None = None) -> dict:
@@ -301,13 +306,13 @@ async def pipeline(s: Session) -> None:
         missing = [m for m in T.missing_required(profile) if m != "budget_max"]
         chips: list[str] = []
         if unsupported:
-            question = (f"Пока ищу объявления в городах: {', '.join(sources.SUPPORTED_CITIES)}. "
-                        f"Город «{profile['city']}» ещё не подключён — какой из этих подойдёт?")
+            question = (f"Город «{profile['city']}» на Циане ещё не подключён: ищу в {len(sources.SUPPORTED_CITIES)} "
+                        "городах — областных центрах и крупных городах Подмосковья. Какой подойдёт?")
             profile["city"] = None
-            chips = sources.SUPPORTED_CITIES[:4]
+            chips = sources.FEATURED_CITIES[:4]
         elif missing:
             question = T.clarify_question(missing)
-            chips = sources.SUPPORTED_CITIES[:4] if "city" in missing else ["1 комната", "2 комнаты", "3 комнаты"]
+            chips = sources.FEATURED_CITIES[:4] if "city" in missing else ["1 комната", "2 комнаты", "3 комнаты"]
         elif profile.get("budget_max") is None and profile.get("budget_unknown"):
             fin_inputs, aff = await ask_affordability(s, profile, market)
             profile["budget_max"] = aff["budget"]

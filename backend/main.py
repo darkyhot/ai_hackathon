@@ -83,6 +83,7 @@ async def health():
         "configured": settings.llm_provider,
         "reason": getattr(llm, "reason", None),
         "cities": sources.SUPPORTED_CITIES,
+        "featured_cities": sources.FEATURED_CITIES,
         "demo": settings.demo,
         "stt": stt.status(),
         "db": repo.record(lambda d: d.bind.dialect.name, default=None),

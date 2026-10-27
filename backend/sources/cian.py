@@ -21,7 +21,7 @@ from pathlib import Path
 
 import httpx
 
-from .base import SourceUnavailable
+from .base import CIAN_REGIONS, SourceUnavailable, city_stem
 
 log = logging.getLogger(__name__)
 
@@ -33,16 +33,14 @@ CACHE_TTL = 30 * 60
 SNAPSHOT_VERSION = 2  # 2 — без долей; срезы другой версии не используем
 MIN_INTERVAL = 3.0
 
-# город -> (код региона, поддомен, город в предложном падеже для проверки заголовка)
-REGIONS = {
-    "Москва": (1, "www", "Москв"),
-    "Санкт-Петербург": (2, "spb", "Санкт-Петербург"),
-    "Казань": (4777, "kazan", "Казан"),
-    "Новосибирск": (4897, "novosibirsk", "Новосибирск"),
-    "Екатеринбург": (4743, "ekb", "Екатеринбург"),
-    "Нижний Новгород": (4885, "nn", "Нижн"),
-    "Краснодар": (4820, "krasnodar", "Краснодар"),
-}
+# город -> (код региона, поддомен, основа названия для проверки заголовка страницы).
+# Поддомены проверены для семи городов; для остальных — www.cian.ru с кодом региона.
+SUBDOMAINS = {"Москва": "www", "Санкт-Петербург": "spb", "Казань": "kazan", "Новосибирск": "novosibirsk",
+              "Екатеринбург": "ekb", "Нижний Новгород": "nn", "Краснодар": "krasnodar"}
+TITLE_STEMS = {"Москва": "Москв", "Нижний Новгород": "Нижн"}
+REGIONS = {city: (region, SUBDOMAINS.get(city, "www"), TITLE_STEMS.get(city) or city_stem(city))
+           for city, region in CIAN_REGIONS.items()}
+VERIFIED_CITIES = list(SUBDOMAINS)  # их предлагаем кнопками
 
 # Округа Москвы: номер в фильтре Циана (district[0]=...) — проверено по данным выдачи
 MOSCOW_OKRUGS = {"СЗАО": 1, "ЦАО": 4, "САО": 5, "СВАО": 6, "ВАО": 7, "ЮВАО": 8, "ЮАО": 9, "ЮЗАО": 10, "ЗАО": 11}
