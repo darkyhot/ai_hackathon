@@ -77,10 +77,57 @@ def supported(city: str | None) -> bool:
     return city in REGIONS
 
 
+_SUBS: dict[str, str] | None = None
+SUBS_FILE = CACHE_DIR / "subdomains.json"
+
+
+def _learned_subdomains() -> dict[str, str]:
+    """Поддомены городов, которые Циан сам назвал редиректом (www.cian.ru + region=4780 -> kaluga.cian.ru)."""
+    global _SUBS
+    if _SUBS is None:
+        try:
+            _SUBS = json.loads(SUBS_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _SUBS = {}
+    return _SUBS
+
+
+def _learn_subdomain(city: str, sub: str) -> None:
+    subs = _learned_subdomains()
+    if subs.get(city) == sub:
+        return
+    subs[city] = sub
+    log.info("Циан: город %s живёт на %s.cian.ru — запомнил", city, sub)
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        SUBS_FILE.write_text(json.dumps(subs, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def is_cian_url(url: str, hosts: tuple[str, ...] = ("cian.ru",)) -> bool:
+    """https и домен Циана (или его CDN) — другие адреса агент не открывает, даже если они попали в данные."""
+    from urllib.parse import urlparse
+    u = urlparse(url or "")
+    host = u.hostname or ""
+    return u.scheme == "https" and any(host == h or host.endswith("." + h) for h in hosts)
+
+
+def redirect_target(url: str, location: str) -> str | None:
+    """Куда Циан перенаправил запрос, если это не капча и не чужой сайт. Иначе None."""
+    from urllib.parse import urljoin, urlparse
+    if not location or "captcha" in location:
+        return None
+    target = urljoin(url, location)
+    host = urlparse(target).hostname or ""
+    return target if host == "cian.ru" or host.endswith(".cian.ru") else None
+
+
 def build_url(city: str, rooms: int, budget: int | None, page: int = 1, okrug: str | None = None, new: bool = False) -> str:
     """Свежие объявления, только целые квартиры (flat_share=2 — без долей);
     object_type: 1 — вторичка, 2 — новостройки; сортировка по дате — без перекоса в продвигаемые объекты."""
     region, sub, _ = REGIONS[city]
+    sub = _learned_subdomains().get(city, sub)
     room_param = "room9=1" if rooms == 0 else f"room{min(rooms, 5)}=1"
     url = (f"https://{sub}.cian.ru/cat.php?deal_type=sale&engine_version=2&offer_type=flat"
            f"&region={region}&{room_param}&object_type%5B0%5D={2 if new else 1}&flat_share=2&sort=creation_date_desc&p={page}")
@@ -320,13 +367,29 @@ async def _fetch_page(city: str, rooms: int, budget: int | None, page: int, okru
             _last_request = time.monotonic()
             try:
                 status, location, text = await getter(url)
+                # Циан переводит на поддомен города (www -> kaluga.cian.ru) редиректом 301/302 — идём за ним
+                for _ in range(2):
+                    target = redirect_target(url, location) if status in (301, 302, 303, 307, 308) else None
+                    if not target:
+                        break
+                    from urllib.parse import urlparse
+                    old_host, new_host = urlparse(url).hostname, urlparse(target).hostname or ""
+                    if new_host != old_host and new_host.endswith(".cian.ru"):
+                        _learn_subdomain(city, new_host.split(".")[0])
+                        # фильтры поиска держим своими: тот же адрес, но на поддомене города
+                        url = build_url(city, rooms, budget, page, okrug, new)
+                    else:
+                        url = target
+                    await asyncio.sleep(max(0.0, MIN_INTERVAL - (time.monotonic() - _last_request)))
+                    _last_request = time.monotonic()
+                    status, location, text = await getter(url)
             except Exception as exc:  # сеть, TLS — пробуем следующий способ
                 problem = f"{name}: {type(exc).__name__}"
                 continue
             problem = _blocked(status, location)
             if problem is None:
                 break
-            log.info("Циан через %s: %s — пробую дальше", name, problem)
+            log.info("Циан через %s: %s%s — пробую дальше", name, problem, f" → {location[:120]}" if location else "")
         else:
             raise SourceUnavailable(f"Циан недоступен ({problem})")
     title = re.search(r"<title>([^<]*)", text)
@@ -473,6 +536,8 @@ async def check_listing_page(url: str | None) -> tuple[bool | None, str]:
     global _page_last
     if not url:
         return None, "нет ссылки"
+    if not is_cian_url(url):
+        return None, "ссылка не на Циан — не открываю"
     if demo_mode():
         return None, "демо-режим: без сети"
     offer_id = (re.search(r"/(\d{5,})/?", url) or [None, ""])[1]

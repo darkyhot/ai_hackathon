@@ -264,6 +264,21 @@ class ApiTest(Base):
         hist = self.c.get("/api/me/history").json()
         self.assertEqual(hist["sessions"][0]["id"], sid)
 
+    def test_session_belongs_to_its_browser(self):
+        with mock.patch("backend.agent.orchestrator.run_session"):
+            sid = self.c.post("/api/session", json={"query": "двушка в Казани до 9 млн"}).json()["id"]
+        stranger = TestClient(self.c.app)  # другой браузер — другая cookie vid
+        self.assertEqual(stranger.post(f"/api/session/{sid}/message", json={"text": "привет"}).status_code, 404)
+        self.assertEqual(stranger.post(f"/api/session/{sid}/confirm", json={"kind": "red_lines"}).status_code, 404)
+        self.assertNotEqual(self.c.post(f"/api/session/{sid}/confirm", json={"kind": "red_lines"}).status_code, 404)
+
+    def test_only_cian_urls_opened(self):
+        self.assertTrue(cian.is_cian_url("https://kazan.cian.ru/sale/flat/1/"))
+        self.assertTrue(cian.is_cian_url("https://images.cdn-cian.ru/a.jpg", ("cdn-cian.ru",)))
+        for bad in ["http://kazan.cian.ru/x", "https://cian.ru.evil.com/x", "https://169.254.169.254/", "file:///etc/passwd"]:
+            self.assertFalse(cian.is_cian_url(bad), bad)
+        self.assertEqual(asyncio.run(cian.check_listing_page("https://evil.com/sale/flat/123456/"))[0], None)
+
     def test_login_logout_and_errors(self):
         self.assertEqual(self.c.post("/api/auth/register", json={"email": "bad", "password": "password123"}).status_code, 422)
         self.assertEqual(self.c.post("/api/auth/register", json={"email": "a@b.ru", "password": "short"}).status_code, 422)

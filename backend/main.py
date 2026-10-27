@@ -174,16 +174,17 @@ async def start(req: StartRequest, request: Request):
     return {"id": s.id}
 
 
-def _session(sid: str) -> O.Session:
+def _session(sid: str, request: Request) -> O.Session:
+    """Сессия агента — только тому браузеру, который её создал (cookie vid). Чужой id — как несуществующий."""
     s = O.SESSIONS.get(sid)
-    if not s:
+    if not s or (s.visitor_id and auth.visitor_id(request) != s.visitor_id):
         raise HTTPException(404, "Сессия не найдена")
     return s
 
 
 @app.get("/api/session/{sid}/stream")
 async def stream(sid: str, request: Request):
-    s = _session(sid)
+    s = _session(sid, request)
     if s.task is not None:
         raise HTTPException(409, "Сессия уже запущена")
     s.task = asyncio.create_task(O.run_session(s))
@@ -213,37 +214,39 @@ async def stream(sid: str, request: Request):
 
 
 @app.post("/api/session/{sid}/confirm")
-async def confirm(sid: str, req: ConfirmRequest):
-    if not _session(sid).resolve(req.kind, req.approved, req.data):
+async def confirm(sid: str, req: ConfirmRequest, request: Request):
+    if not _session(sid, request).resolve(req.kind, req.approved, req.data):
         raise HTTPException(409, f"Нет ожидающего подтверждения «{req.kind}»")
     return {"ok": True}
 
 
 @app.post("/api/session/{sid}/seller")
-async def seller(sid: str, req: SellerReply):
-    await _session(sid).seller_queue.put(req.text.strip())
+async def seller(sid: str, req: SellerReply, request: Request):
+    await _session(sid, request).seller_queue.put(req.text.strip())
     return {"ok": True}
 
 
 @app.post("/api/session/{sid}/message")
-async def message(sid: str, req: ClientMessage):
+async def message(sid: str, req: ClientMessage, request: Request):
     """Текст или голос клиента: ответ на вопрос, пожелание к подборке, заметка."""
-    kind = await _session(sid).receive_text(req.text.strip(), {"liked": req.liked, "disliked": req.disliked})
+    kind = await _session(sid, request).receive_text(req.text.strip(), {"liked": req.liked, "disliked": req.disliked})
     return {"ok": True, "handled_as": kind}
 
 
 @app.post("/api/session/{sid}/product")
-async def open_product(sid: str, req: ProductRequest):
+async def open_product(sid: str, req: ProductRequest, request: Request):
     """Открыть продукт из финансового плана (демо: без реального открытия)."""
-    await _session(sid).open_product(req.product, req.amount)
+    await _session(sid, request).open_product(req.product, req.amount)
     return {"ok": True}
 
 
 @app.get("/api/listing/{listing_id}/security")
-async def listing_security(listing_id: str, sid: str | None = None):
+async def listing_security(listing_id: str, request: Request, sid: str | None = None):
     """Окно проверки безопасности: каждый критерий с методом, доказательством и ссылкой на официальный сервис,
     плюс факты из звонков продавцу с уверенностью."""
     s = O.SESSIONS.get(sid) if sid else None
+    if s and s.visitor_id and auth.visitor_id(request) != s.visitor_id:
+        s = None  # чужая сессия: отдаём общее досье по объявлению, без данных этой сессии
     dossier = s.checks.get(listing_id) if s else None
     listing = None
     if dossier is None or s is None:

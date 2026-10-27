@@ -15,6 +15,7 @@ from sqlalchemy import select
 from .. import db
 from ..config import settings
 from ..db.models import Listing, ListingPhoto, utcnow
+from ..sources import cian
 
 log = logging.getLogger(__name__)
 
@@ -26,15 +27,20 @@ async def download_missing(limit: int = 300) -> int:
                          .limit(limit)).all()
     done = 0
     base = Path(settings.photos_dir)
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as http:
+    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as http:
         for pid, lid, pos, url in todo:
+            if not cian.is_cian_url(url, ("cian.ru", "cdn-cian.ru")):
+                continue  # фото только с Циана
             try:
                 r = await http.get(url)
                 r.raise_for_status()
             except httpx.HTTPError as exc:
                 log.info("фото %s не скачалось: %s", url, exc)
                 continue
-            path = base / lid / f"{pos}.jpg"
+            if len(r.content) > 10 * 1024 * 1024 or not r.headers.get("content-type", "").startswith("image/"):
+                continue  # не картинка или слишком большая
+            safe_id = "".join(ch for ch in lid if ch.isalnum() or ch == "-")[:40]  # id — часть пути на диске
+            path = base / safe_id / f"{int(pos)}.jpg"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(r.content)
             with db.session() as s:
