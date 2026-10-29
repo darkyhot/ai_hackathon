@@ -26,7 +26,21 @@ def to_gigachat_functions(tools: list[Tool]) -> list[dict]:
 
 
 def to_gigachat_messages(messages: list[dict], json_mode: bool) -> list[dict]:
-    out = [dict(m) for m in messages]
+    """Формат OpenAI -> GigaChat: вызов действия — function_call у ассистента, результат — сообщение role=function."""
+    out = []
+    names: dict[str, str] = {}  # id вызова -> имя функции (у GigaChat результат подписывается именем)
+    for m in messages:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            call = m["tool_calls"][0]  # GigaChat вызывает одну функцию за ход
+            names[call["id"]] = call["function"]["name"]
+            args = call["function"]["arguments"]
+            out.append({"role": "assistant", "content": m.get("content") or "",
+                        "function_call": {"name": call["function"]["name"],
+                                          "arguments": json.loads(args) if isinstance(args, str) else args}})
+        elif m.get("role") == "tool":
+            out.append({"role": "function", "name": names.get(m.get("tool_call_id"), m.get("name", "")), "content": m["content"]})
+        else:
+            out.append({k: v for k, v in m.items() if k in ("role", "content")})
     if json_mode:
         if out and out[0]["role"] == "system":
             out[0]["content"] = f"{out[0]['content']}\n\n{JSON_HINT}"
@@ -45,7 +59,7 @@ def parse_function_call(msg: dict) -> list[ToolCall]:
             args = json.loads(args)
         except json.JSONDecodeError:
             args = {}
-    return [ToolCall(name=fc.get("name", ""), arguments=args)]
+    return [ToolCall(name=fc.get("name", ""), arguments=args, id=f"call_{uuid.uuid4().hex[:8]}")]
 
 
 class GigaChatClient(LLMClient):

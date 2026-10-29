@@ -1,4 +1,4 @@
-"""Проверки без сети: GigaChat-адаптер на моках httpx, разбор Циана, рамки торга,
+"""Проверки без сети: GigaChat-адаптер на моках httpx, разбор Циана, рамки торга (поддельная модель звонка),
 финансовый помощник, обратная связь, экономика.
 
 Запуск: .venv/bin/python -m unittest discover -s tests -v
@@ -16,11 +16,17 @@ from backend import geo
 from backend.agent import finance as F
 from backend.agent import negotiation as N
 from backend.agent import preferences as P
+from backend.agent import deal as D
+from backend.agent import features as FT
+from backend.agent import mortgage as M
+from backend.agent import pricing as PR
+from backend.agent import profile as PF
 from backend.agent import seller_sim
-from backend.agent import tools as T
-from backend.llm import Tool, build_llm
+from backend.agent.actions.search import fits
+from backend.llm import LLMError, Tool
 from backend.llm.gigachat import GigaChatClient, to_gigachat_functions, to_gigachat_messages
 from backend.sources import cian
+from tests.fakes import NegotiationLLM
 
 db.configure("sqlite://")  # база агента — в памяти: тесты не пишут в backend/data
 
@@ -117,62 +123,59 @@ class CianParsingTest(unittest.TestCase):
 
 
 class AgentToolsTest(unittest.TestCase):
-    def test_parse_request_and_missing(self):
-        p = T.merge_profile(T.parse_request_rules("ищу двушку, у нас ребёнок"))
-        self.assertEqual(p["rooms"], 2)
-        self.assertTrue(p["near_school"])
-        self.assertEqual(T.missing_required(p), ["city", "budget_max"])
-        p = T.merge_profile(T.parse_request_rules("Казань, до 9 млн"), p)
-        self.assertEqual(T.missing_required(p), [])
-        self.assertTrue(p["near_school"], "ответ на уточнение не должен стирать сказанное раньше")
+    def test_profile_merge_and_missing(self):
+        p = PF.merge_profile({"rooms": 2, "poi": ["school", "unknown"], "features": ["balcony", "balcony_loggia"]})
+        self.assertEqual(PF.missing_required(p), ["city", "budget_max"])
+        self.assertEqual((p["poi"], p["features"]), (["school"], ["balcony_loggia"]))  # неизвестное — прочь, «оба» включает «любой»
+        p = PF.merge_profile({"city": "в Казани", "budget_max": 9, "rooms": None}, p)
+        self.assertEqual((p["city"], p["budget_max"], p["rooms"]), ("Казань", 9_000_000, 2))  # пустое не стирает сказанное
+        self.assertEqual(PF.missing_required(p), [])
 
     def test_fair_price_and_missing_info(self):
         pool = [listing(id=f"c{i}", price=7_000_000 + i * 100_000) for i in range(6)]
-        fp = T.fair_price(listing(), pool)
+        fp = PR.fair_price(listing(), pool)
         self.assertLess(fp["low"], fp["fair"])
         self.assertLess(fp["fair"], fp["high"])
-        self.assertIn("condition", [q["key"] for q in T.missing_info(listing())])
+        self.assertIn("condition", [q["key"] for q in FT.missing_info(listing())])
 
     def test_legal_check_does_not_invent_risks(self):
-        clean = T.legal_check(listing())
+        clean = D.legal_check(listing())
         self.assertEqual(clean["status"], "ok")
-        flagged = T.legal_check(listing(description="Продаётся доля, квартира в наследстве"))
+        flagged = D.legal_check(listing(description="Продаётся доля, квартира в наследстве"))
         self.assertEqual(flagged["status"], "warn")
 
 
 class NegotiationTest(unittest.TestCase):
-    def test_offline_call_has_three_phases_and_respects_limits(self):
-        x = listing()
-        fp = T.fair_price(x, [listing(id=f"c{i}", price=7_200_000 + i * 50_000) for i in range(6)])
-        seller = seller_sim.build(x)
-        n = N.Negotiation(listing=x, seller=seller, fair=fp, authority=min(9_000_000, x["price"], fp["high"]),
-                          questions=T.missing_info(x), slots=T.client_slots())
+    def make(self, mode="auto", **kw):
+        x = listing(**kw)
+        fp = PR.fair_price(x, [listing(id=f"c{i}", price=7_200_000 + i * 50_000) for i in range(6)])
+        return N.Negotiation(listing=x, seller=seller_sim.build(x), fair=fp, authority=min(9_000_000, x["price"], fp["high"]),
+                             questions=FT.missing_info(x), slots=D.client_slots(), mode=mode)
+
+    def test_call_has_three_phases_and_respects_limits(self):
+        n = self.make()
 
         async def go():
-            return [e async for e in N.run(build_llm("mock"), n)]
+            return [e async for e in N.run(NegotiationLLM(n), n)]
 
         events = run(go())
-        phases = [e["phase"] for e in events if e["type"] == "call_phase"]
-        self.assertEqual(phases, ["clarify", "bargain", "viewing"])
+        self.assertEqual([e["phase"] for e in events if e["type"] == "call_phase"], ["clarify", "bargain", "viewing"])
         end = events[-1]
         self.assertLessEqual(end["price"], n.authority)
-        self.assertGreaterEqual(end["price"], seller["min_price"])
+        self.assertGreaterEqual(end["price"], n.seller["min_price"])
         self.assertTrue(end["learned"])
-        self.assertIn(end["viewing"], n.slots)
         offers = [e["offer"] for e in events if e["type"] == "turn" and e["speaker"] == "agent" and e["offer"]]
         self.assertEqual(offers, sorted(offers), "агент не должен откатывать предложение")
 
     def test_phone_call_waits_for_seller_and_stops_on_hangup(self):
-        x = listing()
-        n = N.Negotiation(listing=x, seller=seller_sim.build(x), fair=T.fair_price(x, [x]), authority=7_300_000,
-                          questions=T.missing_info(x), slots=T.client_slots(), mode="phone")
+        n = self.make(mode="phone")
         answers = iter(["Ремонт свежий, документы готовы", N.HANGUP])
 
         async def seller_input():
             return next(answers, None)
 
         async def go():
-            return [e async for e in N.run(build_llm("mock"), n, human_input=seller_input)]
+            return [e async for e in N.run(NegotiationLLM(n), n, human_input=seller_input)]
 
         events = run(go())
         self.assertEqual(sum(e["type"] == "await_seller" for e in events), 3)  # уточнение, торг, просмотр
@@ -181,9 +184,22 @@ class NegotiationTest(unittest.TestCase):
         self.assertNotIn(N.HANGUP, said)
         self.assertEqual(events[-1]["status"], "no_deal")
 
+    def test_model_failure_stops_the_call_honestly(self):
+        n = self.make()
+
+        class Down(NegotiationLLM):
+            async def chat_json(self, *a, **k):
+                raise LLMError("сеть")
+
+        async def go():
+            return [e async for e in N.run(Down(n), n)]
+
+        with self.assertRaises(N.CallError):  # никаких сценарных подмен реплик
+            run(go())
+
     def test_guards(self):
         x = listing()
-        n = N.Negotiation(listing=x, seller=seller_sim.build(x), fair=T.fair_price(x, [x]), authority=7_300_000)
+        n = N.Negotiation(listing=x, seller=seller_sim.build(x), fair=PR.fair_price(x, [x]), authority=7_300_000)
         move = {"utterance": "Предлагаю 7 450 000", "offer": 7_450_000, "accept": False}
         N.guard_buyer(n, move, "bargain", first=False)
         self.assertEqual(move["offer"], 7_300_000)
@@ -215,19 +231,16 @@ class FinanceAndFeedbackTest(unittest.TestCase):
         self.assertIn("Кировский", p.districts_minus)
         self.assertTrue(p.avoid_first)
         self.assertGreater(P.adjust(a, p), P.adjust(b, p))
-        run(P.apply_text(p, "хочу кухню побольше, от 10 метров", build_llm("mock"), ["Приволжский"]))
-        self.assertEqual(p.kitchen_min, 10.0)
+        p.sync({"kitchen_min": 10.0, "features": ["wardrobe"], "avoid_districts": ["Советский"]})  # пожелания от агента
+        self.assertEqual((p.kitchen_min, p.features), (10.0, ["wardrobe"]))
+        self.assertTrue({"Кировский", "Советский"} <= p.districts_minus, "выученное из отметок не теряется")
 
 
 class RequestDetailsTest(unittest.TestCase):
-    def test_okrug_payment_and_budget_unknown(self):
-        p = T.merge_profile(T.parse_request_rules("Найди трехкомнатную на юго-западе Москвы, рядом школа"))
-        self.assertEqual((p["city"], p["rooms"], p["okrug"]), ("Москва", 3, "ЮЗАО"))
-        p = T.merge_profile(T.parse_request_rules("не знаю бюджет, планирую ипотеку"), p)
-        self.assertTrue(p["budget_unknown"])
-        self.assertEqual(T.payment_from_text("покупаю за наличные"), "cash")
-        self.assertEqual(T.payment_from_text("в ипотеку, но взнос ещё коплю"), "mortgage_saving")
-        self.assertEqual(T.merge_profile({"city": "Казань", "okrug": "ЮЗАО"})["okrug"], None, "округа — только в Москве")
+    def test_okrug_only_in_moscow(self):
+        p = PF.merge_profile({"city": "Москва", "rooms": 3, "okrug": "юго-запад", "payment": "наличные"})
+        self.assertEqual((p["city"], p["okrug"], p["payment"]), ("Москва", "ЮЗАО", None))  # неизвестный способ оплаты — нет
+        self.assertEqual(PF.merge_profile({"city": "Казань", "okrug": "ЮЗАО"})["okrug"], None, "округа — только в Москве")
 
     def test_shares_are_skipped(self):
         o = {"cianId": 7, "totalArea": "60", "category": "flatShareSale", "shareAmount": "1/3",
@@ -237,14 +250,14 @@ class RequestDetailsTest(unittest.TestCase):
         self.assertIn("district%5B0%5D=10", cian.build_url("Москва", 3, 30_000_000, 1, "ЮЗАО"))
 
     def test_cash_deal_has_no_mortgage(self):
-        plan = T.deal_plan(listing(), 7_300_000, None)
+        plan = D.deal_plan(listing(), 7_300_000, None)
         self.assertTrue(plan["cash"])
         self.assertEqual(plan["loan"], 0)
         self.assertFalse(any("ипотек" in t["title"].lower() for t in plan["timeline"]))
 
     def test_affordability(self):
         a = F.affordable({"monthly_income": 250_000, "monthly_expenses": 120_000, "savings": 1_500_000,
-                          "horizon_months": 12}, T.DEMO_RATE)
+                          "horizon_months": 12}, M.DEMO_RATE)
         self.assertGreater(a["budget"], 5_000_000)
         self.assertLessEqual(a["budget"], min(a["by_payment"], a["by_down"]) + 100_000)
 
@@ -264,23 +277,19 @@ class EconomicsTest(unittest.TestCase):
 
 
 class WishesAndMapTest(unittest.TestCase):
-    def test_features_from_request_and_description(self):
-        self.assertEqual(T.wanted_features("двушка с балконом и гардеробной"), ["balcony", "wardrobe"])
-        self.assertEqual(T.wanted_features("можно без балкона"), [])
+    def test_features_from_description(self):
         x = listing(description="Есть гардеробная, лоджия застеклена")
-        self.assertTrue(T.feature_status(x, "wardrobe"))
-        self.assertIsNone(T.feature_status(listing(description="Хорошая квартира"), "wardrobe"))
-        self.assertFalse(T.feature_status(listing(description="Квартира без балкона"), "balcony"))
-        asked = T.missing_info(listing(description=""), 4, ["wardrobe"])
+        self.assertTrue(FT.feature_status(x, "wardrobe"))
+        self.assertIsNone(FT.feature_status(listing(description="Хорошая квартира"), "wardrobe"))
+        self.assertFalse(FT.feature_status(listing(description="Квартира без балкона"), "balcony"))
+        asked = FT.missing_info(listing(description=""), 4, ["wardrobe"])
         self.assertEqual(asked[0]["label"], "гардеробная")  # агент спросит у продавца
 
     def test_named_district_matches_any_case(self):
-        self.assertTrue(T.in_districts({"district": "Черёмушки"}, ["черемушек"]))
-        self.assertFalse(T.in_districts({"district": "Ясенево"}, ["Черёмушки"]))
+        self.assertTrue(PF.in_districts({"district": "Черёмушки"}, ["черемушек"]))
+        self.assertFalse(PF.in_districts({"district": "Ясенево"}, ["Черёмушки"]))
 
     def test_nearby_from_map(self):
-        self.assertEqual(geo.wanted("рядом школа и поликлиника, есть парковка"), ["school", "clinic"])
-        self.assertEqual(geo.wanted("хочу у воды, рядом больница"), ["hospital", "water"])
         # ответ Overpass: школа (центр здания) и река (контур)
         elements = [
             {"type": "way", "id": 1, "tags": {"amenity": "school", "name": "Школа № 1"}, "center": {"lat": 55.7905, "lon": 49.1205}},
@@ -307,29 +316,23 @@ class WishesAndMapTest(unittest.TestCase):
         self.assertFalse(geo.has_all(x, ["school", "water"]))
 
     def test_balcony_and_loggia_means_both(self):
-        self.assertEqual(T.wanted_features("с лоджией и балконом"), ["balcony_loggia"])
-        self.assertEqual(T.wanted_features("балкон или лоджия"), ["balcony"])
-        self.assertEqual(T.merge_features(["balcony"], ["balcony_loggia"]), ["balcony_loggia"])
+        self.assertEqual(FT.merge_features(["balcony"], ["balcony_loggia"]), ["balcony_loggia"])
         both = listing(balconies=2, loggias=1)
         only_loggia = listing(balconies=1, loggias=1)
         by_text = listing(description="Застеклённый балкон и лоджия")
-        self.assertEqual([T.feature_status(x, "balcony_loggia") for x in (both, only_loggia, by_text)], [True, False, True])
+        self.assertEqual([FT.feature_status(x, "balcony_loggia") for x in (both, only_loggia, by_text)], [True, False, True])
 
     def test_selection_keeps_only_confirmed_wishes(self):
-        from backend.agent import orchestrator as O
         prefs = P.Prefs(features=["wardrobe"], poi=["school"])
         good = listing(description="Есть гардеробная", nearby={"school": {"name": "Школа", "dist": 300}})
         no_school = listing(description="Есть гардеробная", nearby={"school": None})
         unknown = listing(description="Хорошая квартира", nearby={"school": {"name": "Школа", "dist": 300}})
-        self.assertEqual([O.fits(x, prefs) for x in (good, no_school, unknown)], [True, False, False])
-        self.assertTrue(O.fits(no_school, prefs, map_ok=False))  # карта не ответила — школу не проверяем
-        self.assertEqual(O.drop_wishes("Без условия: гардеробная", prefs), ["гардеробная"])
-        self.assertEqual(prefs.features, [])
-        self.assertEqual(O.drop_wishes("Показать без этих условий", prefs), ["школа"])
+        self.assertEqual([fits(x, prefs) for x in (good, no_school, unknown)], [True, False, False])
+        self.assertTrue(fits(no_school, prefs, map_ok=False))  # карта не ответила — школу не проверяем
 
     def test_seller_reply_with_price_skips_llm(self):
         x = listing()
-        n = N.Negotiation(listing=x, seller=seller_sim.build(x), fair=T.fair_price(x, [x]), authority=7_300_000)
+        n = N.Negotiation(listing=x, seller=seller_sim.build(x), fair=PR.fair_price(x, [x]), authority=7_300_000)
         n.offer = 7_200_000
 
         class Boom:
@@ -346,7 +349,7 @@ class WishesAndMapTest(unittest.TestCase):
     def test_counter_price_without_mln_is_not_agreement(self):
         """Агент: 23,4 млн. Продавец: «Нет, давай 23 600» — это встречная цена, а не согласие на 23,4."""
         x = listing(price=23_650_000)
-        n = N.Negotiation(listing=x, seller=seller_sim.build(x), fair=T.fair_price(x, [x]), authority=23_650_000)
+        n = N.Negotiation(listing=x, seller=seller_sim.build(x), fair=PR.fair_price(x, [x]), authority=23_650_000)
         n.offer = 23_400_000
 
         class Boom:

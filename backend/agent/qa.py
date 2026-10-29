@@ -11,7 +11,7 @@ import re
 
 from ..llm import LLMError
 from . import prompts
-from .tools import fmt
+from .numbers import fmt
 
 log = logging.getLogger(__name__)
 
@@ -54,8 +54,6 @@ def build_context(s) -> dict:
     if s.journal.get("final_price"):
         ctx["итог торга"] = {"цена объявления": fmt(s.journal["base_price"]), "договорились": fmt(s.journal["final_price"]),
                              "экономия": fmt(s.journal.get("savings", 0))}
-    if s.notes:
-        ctx["заметки клиента"] = s.notes[-5:]
     return ctx
 
 

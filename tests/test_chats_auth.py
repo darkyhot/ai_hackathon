@@ -1,7 +1,7 @@
 """Аккаунты и история диалогов: вход, доступ только к своим диалогам, повтор ленты, продолжение диалога.
 
-Без сети: модель — офлайн-заглушка, база — SQLite в памяти. Запрос с городом, комнатами и бюджетом
-останавливает агента на «красных линиях» — до поиска на Циане дело не доходит.
+Без сети: модель агента — поддельная, по сценарию (записать запрос, показать рамки), база — SQLite в памяти.
+Агент останавливается на «красных линиях» — до поиска на Циане дело не доходит.
 """
 from __future__ import annotations
 
@@ -13,10 +13,15 @@ from fastapi.testclient import TestClient
 
 from backend import auth, db
 from backend import main as M
-from backend.agent import orchestrator as O
-from backend.llm import build_llm
+from backend.agent import session as O
+from tests.fakes import ScriptedLLM, call, last_result, say
 
 QUERY = "Ищу 2-комнатную в Казани до 9 млн"
+
+
+def start_model() -> ScriptedLLM:
+    """Агент записывает запрос и показывает рамки — дальше ждёт клиента."""
+    return ScriptedLLM(call("update_request", city="Казань", rooms=2, budget_max=9_000_000), call("confirm_red_lines"))
 
 
 def read_until(client: TestClient, url: str, stop) -> list[dict]:
@@ -28,6 +33,8 @@ def read_until(client: TestClient, url: str, stop) -> list[dict]:
             if not line.startswith("data: "):
                 continue
             ev = json.loads(line[6:])
+            if ev["type"] == "typing":  # сигнал «агент думает» — не событие ленты
+                continue
             out.append(ev)
             if stop(ev):
                 break
@@ -39,7 +46,8 @@ class ChatsAndAuthTest(unittest.TestCase):
         db.configure("sqlite://")
         auth._fails.clear()
         O.SESSIONS.clear()
-        self.llm = patch.object(M, "get_llm", lambda: build_llm("mock"))
+        self.models: list[ScriptedLLM] = []  # что подставить при следующем создании или подъёме агента
+        self.llm = patch.object(M, "get_llm", lambda: self.models.pop(0) if self.models else start_model())
         self.llm.start()
         self.startup = patch.object(M.app.router, "on_startup", [])  # без Whisper и уборщика
         self.startup.start()
@@ -79,6 +87,10 @@ class ChatsAndAuthTest(unittest.TestCase):
             self.assertEqual(codes, [401] * 5 + [429])
 
     def test_chat_is_private_replays_and_continues(self):
+        self.models.append(ScriptedLLM(
+            call("update_request", city="Казань", rooms=2, budget_max=9_000_000), call("confirm_red_lines"),
+            say("Что поменять в запросе?"),
+            call("update_request", rooms=3), call("confirm_red_lines")))
         with self.client() as a, self.client() as b:
             sid, evs = self.start_chat(a)
             seqs = [e["seq"] for e in evs]
@@ -93,38 +105,44 @@ class ChatsAndAuthTest(unittest.TestCase):
             self.assertTrue(all(e.get("replay") for e in again[:-1]))
             self.assertEqual([e["seq"] for e in again[:-1]], [e["seq"] for e in evs[1:]])
             self.assertTrue(again[-1]["live"])
-            # решение клиента — в ленте с подписью кнопки
+            # решение клиента — в ленте с подписью кнопки; агент спрашивает, что поменять
             r = a.post(f"/api/session/{sid}/confirm", json={"kind": "red_lines", "approved": False, "data": {"_label": "Изменить запрос"}})
             self.assertEqual(r.status_code, 200)
-            tail = read_until(a, f"/api/chat/{sid}/stream?after={evs[-1]['seq']}", lambda e: e["type"] in ("done", "replay_end"))
+            tail = read_until(a, f"/api/chat/{sid}/stream?after={evs[-1]['seq']}",
+                              lambda e: e["type"] == "message" and e["role"] == "agent")
             resolved = next(e for e in tail if e["type"] == "resolved")
             self.assertEqual((resolved["kind"], resolved["label"]), ("red_lines", "Изменить запрос"))
-            self.assertEqual(a.get("/api/chats").json()["chats"][0]["status"], "cancelled")
-            # агент закончил — сообщение продолжает этот же диалог с тем, что агент уже знал о запросе
+            # агент работает и ждёт: сообщение — ему, он сам меняет запрос и снова показывает рамки
             r = a.post(f"/api/chat/{sid}/message", json={"text": "а если трёшку?"}).json()
-            self.assertTrue(r["continued"])
-            more = read_until(a, f"/api/chat/{sid}/stream?after={r['after']}",
+            self.assertEqual((r["continued"], r["handled_as"]), (False, "message"))
+            more = read_until(a, f"/api/chat/{sid}/stream?after={tail[-1]['seq']}",
                               lambda e: e["type"] == "confirm" and e["kind"] == "red_lines")
-            self.assertIn("Продолжаю этот диалог", " ".join(e.get("text", "") for e in more if e["type"] == "message"))
             red = more[-1]["payload"]
             self.assertEqual((red["city"], red["rooms"], red["budget_max"]), ("Казань", 3, 9_000_000))
             self.assertGreater(more[-1]["seq"], tail[-1]["seq"])  # нумерация продолжается
 
-    def test_question_in_finished_chat_is_answered_without_new_search(self):
+    def test_agent_restarts_with_memory(self):
+        """Сервер перезапустился, пока агент ждал решения: сообщение поднимает агента с памятью диалога."""
         with self.client() as a:
-            sid, evs = self.start_chat(a)
-            a.post(f"/api/session/{sid}/confirm", json={"kind": "red_lines", "approved": False})
-            done = read_until(a, f"/api/chat/{sid}/stream?after={evs[-1]['seq']}", lambda e: e["type"] in ("done", "replay_end"))
+            sid, _ = self.start_chat(a)
+            for s in list(O.SESSIONS.values()):  # «перезапуск»: задачи и память процесса пропали
+                s.task.cancel()
+            O.SESSIONS.clear()
+            seen = []
+
+            def answer(messages):
+                seen.extend(messages)
+                return say("Безопасные расчёты — деньги уходят продавцу только после регистрации права.")
+            self.models.append(ScriptedLLM(answer))
             r = a.post(f"/api/chat/{sid}/message", json={"text": "Что такое безопасные расчёты?"}).json()
+            self.assertTrue(r["continued"])
             tail = read_until(a, f"/api/chat/{sid}/stream?after={r['after']}",
-                              lambda e: e["type"] in ("idle", "confirm") or (e["type"] == "replay_end" and not e["live"]))
-            types = [e["type"] for e in tail]
-            self.assertIn("idle", types)
-            self.assertNotIn("confirm", types)  # ни «красных линий», ни поиска
-            agent = [e["text"] for e in tail if e["type"] == "message" and e["role"] == "agent"]
-            self.assertIn("модель недоступна", agent[0])  # офлайн: честно, без заготовленных ответов
-            self.assertEqual(a.get("/api/chats").json()["chats"][0]["status"], "cancelled")  # статус диалога прежний
-            self.assertTrue(done)
+                              lambda e: e["type"] == "message" and e["role"] == "agent")
+            self.assertIn("после регистрации", tail[-1]["text"])
+            self.assertFalse(any(e["type"] == "confirm" for e in tail))  # ни рамок заново, ни поиска
+            self.assertEqual(seen[1]["content"], QUERY)  # модель видит прежний разговор
+            interrupted = last_result([m for m in seen if m["role"] != "user" or m["content"] == QUERY])
+            self.assertIn("прервано", interrupted["error"])  # незавершённое действие — честный результат
 
     def test_login_moves_browser_chats_to_account(self):
         with self.client() as phone, self.client() as laptop:
@@ -137,7 +155,7 @@ class ChatsAndAuthTest(unittest.TestCase):
             self.assertTrue(any(e["type"] == "confirm" for e in evs))
 
     def test_idle_sessions_are_released(self):
-        s = O.create_session(QUERY, build_llm("mock"))
+        s = O.create_session(QUERY, ScriptedLLM())
         self.assertEqual(O.reap_idle(now=s.idle_since + O.IDLE_DONE_S + 1), [s.id])  # не запускался и никто не смотрит
         self.assertNotIn(s.id, O.SESSIONS)
 

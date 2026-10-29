@@ -12,7 +12,8 @@ from __future__ import annotations
 
 from datetime import date
 
-from .tools import deal_costs, fmt
+from .mortgage import deal_costs
+from .numbers import fmt
 
 PRODUCTS = {
     "savings_account": {"name": "Накопительный счёт", "rate": 0.10, "low": 0.10, "high": 0.10,

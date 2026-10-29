@@ -314,7 +314,7 @@ button, input, textarea { font: inherit; color: inherit; }
   position: absolute; top: 30px; height: 16px; border-radius: 8px; background: var(--sber-gradient); opacity: .9;
 }
 .ruler .limit { position: absolute; top: 24px; width: 2px; height: 28px; background: var(--ink); opacity: .35; }
-.ruler .limit span { position: absolute; top: 30px; left: 50%; transform: translateX(-50%); font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+.limit-key { display: inline-block; width: 2px; height: 11px; margin: 0 5px -1px 0; background: var(--ink); opacity: .35; }
 .marker {
   position: absolute; top: 0; transform: translateX(-50%); transition: left .9s cubic-bezier(.2, .8, .2, 1);
   display: flex; flex-direction: column; align-items: center; gap: 2px;
@@ -736,3 +736,10 @@ dialog.auth::backdrop { background: rgba(10, 20, 15, .45); }
 .page-check.is-ok { color: var(--green-strong); }
 @media (max-width: 860px) { .page-check { margin-left: 20px; margin-right: 20px; } }
 .meta.corrected { color: var(--blue); }
+
+/* ---------- агент думает */
+.msg-thinking { align-self: flex-start; display: inline-flex; gap: 4px; padding: 12px 14px; background: var(--green-soft); border-bottom-left-radius: 6px; }
+.msg-thinking span { width: 6px; height: 6px; border-radius: 50%; background: var(--green-strong); opacity: .35; animation: thinking 1.2s infinite ease-in-out; }
+.msg-thinking span:nth-child(2) { animation-delay: .15s; }
+.msg-thinking span:nth-child(3) { animation-delay: .3s; }
+@keyframes thinking { 40% { opacity: 1; transform: translateY(-2px); } }

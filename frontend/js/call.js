@@ -97,11 +97,11 @@ export function renderCall(c, onSellerSubmit) {
     <div class="ruler" aria-hidden="true">
       <div class="rail"></div>
       <div class="corridor" style="left:${s.x(c.fair.low)}%;width:${s.x(c.fair.high) - s.x(c.fair.low)}%"></div>
-      <div class="limit" style="left:${s.x(c.authority)}%"><span>лимит клиента</span></div>
+      <div class="limit" style="left:${s.x(c.authority)}%" title="лимит клиента"></div>
       <div class="marker marker-seller" data-m-seller style="left:${s.x(c.ask)}%"><b data-m-seller-label>продавец ${rub(c.ask)}</b><i></i></div>
       <div class="marker marker-agent" data-m-agent style="left:${s.x(c.offer ?? c.fair.target)}%;${c.offer ? "" : "opacity:.35"}"><b data-m-agent-label>${c.offer ? `агент ${rub(c.offer)}` : `цель ${rub(c.fair.target)}`}</b><i></i></div>
     </div>
-    <div class="ruler-scale num"><span>${rub(Math.round(s.lo / 1e4) * 1e4)}</span><span>коридор справедливой цены ${rub(c.fair.low)} – ${rub(c.fair.high)}</span><span>${rub(Math.round(s.hi / 1e4) * 1e4)}</span></div>
+    <div class="ruler-scale num"><span>${rub(Math.round(s.lo / 1e4) * 1e4)}</span><span>коридор справедливой цены ${rub(c.fair.low)} – ${rub(c.fair.high)} · <i class="limit-key"></i>лимит клиента ${rub(c.authority)}</span><span>${rub(Math.round(s.hi / 1e4) * 1e4)}</span></div>
     <div class="transcript" data-transcript>
       ${html.raw(c.lines.map(lineMarkup).join(""))}
       ${html.raw(c.started ? "" : html`<p class="typing">Расшифровка появится, как только агент наберёт номер.</p>`)}

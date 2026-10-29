@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from backend.agent import tools as T
 from backend.sources import SUPPORTED_CITIES, cian
 from backend.sources.base import normalize_city
 
@@ -29,8 +28,6 @@ class CitiesTest(unittest.TestCase):
     def test_more_than_hundred_cities(self):
         self.assertGreater(len(SUPPORTED_CITIES), 100)
         self.assertIn("kazan.cian.ru", cian.build_url("Казань", 2, 6_000_000))
-        p = T.parse_request_rules("ищу двушку в калуге до 6 млн")
-        self.assertEqual((p["city"], p["rooms"], p["budget_max"]), ("Калуга", 2, 6_000_000))
 
 
 class CianFetchTest(unittest.TestCase):

@@ -18,10 +18,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import auth, db, economics, sources
-from .agent import orchestrator as O
+from .agent import session as O
+from .agent.loop import run_session
 from .config import ROOT, settings
 from .db import repo
-from .llm import get_llm
+from .llm import LLMError, get_llm
 from . import phone, stt
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -84,13 +85,16 @@ class ProductRequest(BaseModel):
 
 @app.get("/api/health")
 async def health():
-    llm = get_llm()
+    try:
+        llm, reason = get_llm(), None
+    except LLMError as exc:  # модель не настроена — агент не работает, интерфейс это покажет
+        llm, reason = None, str(exc)
     return {
-        "ok": True,
-        "provider": llm.name,
-        "model": llm.model,
+        "ok": llm is not None,
+        "provider": llm.name if llm else settings.llm_provider,
+        "model": llm.model if llm else None,
         "configured": settings.llm_provider,
-        "reason": getattr(llm, "reason", None),
+        "reason": reason,
         "cities": sources.SUPPORTED_CITIES,
         "featured_cities": sources.FEATURED_CITIES,
         "stt": stt.status(),
@@ -185,8 +189,15 @@ async def me(request: Request):
 @app.post("/api/session")
 async def start(req: StartRequest, request: Request):
     vid, uid = auth.whoami(request)
-    s = O.create_session(req.query, get_llm(), visitor_id=vid, user_id=uid)
+    s = O.create_session(req.query, _llm(), visitor_id=vid, user_id=uid)
     return {"id": s.id}
+
+
+def _llm():
+    try:
+        return get_llm()
+    except LLMError as exc:
+        raise HTTPException(503, f"Модель не настроена: {exc}") from exc
 
 
 def _owns(s: O.Session, request: Request) -> bool:
@@ -237,7 +248,7 @@ async def chat_stream(sid: str, request: Request, after: int = 0):
         if live is not None:
             live.subscribers.add(q)  # сначала подписка, потом история — ни одно событие не потеряется
             if live.task is None:  # новый диалог (или продолжение) запускаем, когда вкладка уже слушает
-                live.task = asyncio.create_task(O.run_session(live))
+                live.task = asyncio.create_task(run_session(live))
         try:
             past = db.safe(repo.chat_events, sid, after)
             if past is None and live is not None:  # база недоступна — из памяти этого запуска
@@ -254,15 +265,16 @@ async def chat_stream(sid: str, request: Request, after: int = 0):
                 try:
                     ev = await asyncio.wait_for(q.get(), timeout=15)
                 except asyncio.TimeoutError:
-                    if await request.is_disconnected():
+                    if await request.is_disconnected() or live.task.done():
                         break
                     yield ": ping\n\n"
                     continue
-                if ev["seq"] <= sent:
-                    continue
-                sent = ev["seq"]
+                if ev["seq"]:  # сигналы («агент думает») без номера — не в истории, идут как есть
+                    if ev["seq"] <= sent:
+                        continue
+                    sent = ev["seq"]
                 yield _sse(ev)
-                if ev["type"] in {"done", "error", "idle"}:
+                if ev["type"] == "error":
                     break
         finally:
             if live is not None:
@@ -276,15 +288,15 @@ async def chat_stream(sid: str, request: Request, after: int = 0):
 
 @app.post("/api/chat/{sid}/message")
 async def chat_message(sid: str, req: ClientMessage, request: Request):
-    """Сообщение в диалог. Агент работает — как обычно; закончил (или сервер перезапускался) —
-    продолжаем диалог новым запуском с тем, что агент уже знал. Ответ: continued — нужно переоткрыть ленту."""
+    """Сообщение в диалог. Агент работает — получит его; остановлен (перезапуск сервера, долгая пауза) —
+    поднимаем агента с памятью диалога. continued — вкладке нужно переоткрыть ленту с события after."""
     if not _can_open(sid, request):
         raise HTTPException(404, "Диалог не найден")
     live = O.SESSIONS.get(sid)
     if live is not None and (live.task is None or O.running(live)):  # агент ещё не запущен или работает
         kind = await live.receive_text(req.text.strip(), {"liked": req.liked, "disliked": req.disliked})
         return {"ok": True, "handled_as": kind, "continued": False}
-    s = O.continue_session(sid, req.text, get_llm())
+    s = O.restore_session(sid, req.text, _llm())
     return {"ok": True, "handled_as": "continue", "continued": True, "after": s.seq}
 
 

@@ -45,7 +45,8 @@ YEARS = 30
 
 # ---------------------------------------------------------------- расчёты
 
-def _annuity(principal: float, annual_rate: float, years: int) -> float:
+def annuity(principal: float, annual_rate: float, years: int) -> float:
+    """Ежемесячный аннуитетный платёж."""
     if principal <= 0:
         return 0.0
     r = annual_rate / 12
@@ -56,7 +57,7 @@ def _annuity(principal: float, annual_rate: float, years: int) -> float:
 def _balance_after(principal: float, annual_rate: float, years: int, months_paid: int) -> float:
     """Остаток долга после months_paid платежей."""
     r = annual_rate / 12
-    pay = _annuity(principal, annual_rate, years)
+    pay = annuity(principal, annual_rate, years)
     return principal * (1 + r) ** months_paid - pay * (((1 + r) ** months_paid - 1) / r)
 
 
@@ -121,7 +122,7 @@ def normalize_family(raw: dict | None) -> dict:
 
 def _loan_row(price: int, down: int, rate: float, years: int = YEARS) -> dict:
     loan = max(0, price - down)
-    pay = _annuity(loan, rate, years)
+    pay = annuity(loan, rate, years)
     return {
         "down_payment": int(down), "loan": int(loan), "rate": rate, "years": years,
         "monthly": int(round(pay, -2)),
@@ -132,7 +133,7 @@ def _loan_row(price: int, down: int, rate: float, years: int = YEARS) -> dict:
 def _family_after_subsidy(row: dict) -> int:
     """Платёж после окончания субсидии (условная ставка), чтобы клиент не удивился через 15 лет."""
     left = _balance_after(row["loan"], row["rate"], row["years"], SUBSIDY_YEARS * 12)
-    return int(round(_annuity(left, POST_SUBSIDY_RATE, row["years"] - SUBSIDY_YEARS), -2))
+    return int(round(annuity(left, POST_SUBSIDY_RATE, row["years"] - SUBSIDY_YEARS), -2))
 
 
 def programs(price: int, city: str | None, family: dict | None, *, down_share: float = 0.2,
@@ -327,3 +328,52 @@ def max_family_price(city: str | None, family: dict | None, down_share: float = 
         return None
     _, limit = family_terms(city, fam["children"])
     return int(limit / (1 - down_share) // 100_000 * 100_000)
+
+
+# ---------------------------------------------------------------- сценарии и расходы
+
+DEMO_RATE = market_rate(0.2)  # рыночная ставка Сбера при взносе 20%; в проде — из предодобрения
+
+
+def deal_costs(price: int, loan: int) -> dict:
+    """Расходы на сделку (допущения по тарифам)."""
+    return {
+        "Оценка залога": 6_000,
+        "Страхование (имущество, жизнь, титул), 1-й год": int(round(loan * 0.0095, -2)),
+        "Сервис безопасных расчётов": 6_900,
+        "Электронная регистрация": 2_000,
+    }
+
+
+def mortgage_scenarios(price: int, monthly_income: int | None = None, down_available: int | None = None,
+                       rate: float | None = None, program: str | None = None, matcap: int = 0) -> dict:
+    """Три сценария ипотеки. rate=None — рыночная ставка Сбера (зависит от взноса), иначе ставка программы.
+    matcap — маткапитал: идёт во взнос, своих нужно меньше."""
+    costs = sum(deal_costs(price, int(price * 0.8)).values())
+    variants = [("Взнос 20%, 30 лет", 0.20, 30), ("Взнос 20%, 20 лет", 0.20, 20), ("Взнос 30%, 25 лет", 0.30, 25)]
+    rows = []
+    for title, dp_share, years in variants:
+        down = int(price * dp_share)
+        loan = price - down
+        r = rate if rate is not None else market_rate(dp_share)
+        pay = annuity(loan, r, years)
+        rows.append({
+            "title": title, "down_payment": down, "loan": loan, "years": years, "rate": r,
+            "monthly": int(round(pay, -2)),
+            "overpay": int(round(pay * years * 12 - loan, -3)),
+            "income_needed": int(round(pay * 2, -3)),
+            "fits_income": None if monthly_income is None else pay * 2 <= monthly_income,
+            "cash_needed": max(0, down - matcap) + costs,
+            "savings_gap": 0 if down_available is None else max(0, down - matcap + costs - down_available),
+        })
+    best = next((r for r in rows if r["fits_income"] is not False), rows[0])
+    return {
+        "rate": best["rate"],
+        "program": program or "Рыночная ипотека Сбера",
+        "matcap": matcap,
+        "deal_costs": costs,
+        "scenarios": rows,
+        "recommended": best["title"],
+        "approved": int(price * 0.8),
+        "per_100k_discount": int(round(annuity(100_000, best["rate"], best["years"]))),
+    }

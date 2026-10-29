@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 
 from backend import db
+from backend.agent import deal as D
 from backend.agent import finance as F
 from backend.agent import mortgage as M
-from backend.agent import orchestrator as O
-from backend.agent import tools as T
-from backend.llm import build_llm
+from backend.agent import profile as PF
+from backend.agent import session as O
+from tests.fakes import ScriptedLLM, call, drive, say
 
 
 def by_key(r):
@@ -63,7 +65,7 @@ class ProgramsTest(unittest.TestCase):
     def test_market_rate_depends_on_down_payment(self):
         self.assertAlmostEqual(M.market_rate(0.2), 0.175)
         self.assertAlmostEqual(M.market_rate(0.5), 0.155)
-        self.assertAlmostEqual(T.DEMO_RATE, 0.175)
+        self.assertAlmostEqual(M.DEMO_RATE, 0.175)
 
 
 class CalculationsTest(unittest.TestCase):
@@ -73,73 +75,65 @@ class CalculationsTest(unittest.TestCase):
         self.assertEqual(a["down_payment"], b["down_payment"], "кредит считается от полного взноса")
 
     def test_scenarios_and_deal_use_program_rate(self):
-        m = T.mortgage_scenarios(7_000_000, 200_000, rate=0.08, program="Семейная ипотека")
+        m = M.mortgage_scenarios(7_000_000, 200_000, rate=0.08, program="Семейная ипотека")
         self.assertTrue(all(s["rate"] == 0.08 for s in m["scenarios"]))
-        self.assertLess(m["scenarios"][0]["monthly"], T.mortgage_scenarios(7_000_000, 200_000)["scenarios"][0]["monthly"])
+        self.assertLess(m["scenarios"][0]["monthly"], M.mortgage_scenarios(7_000_000, 200_000)["scenarios"][0]["monthly"])
         lst = {"price": 7_200_000}
-        d_fam = T.deal_plan(lst, 7_000_000, 1_400_000, rate=0.08, program="Семейная ипотека")
-        self.assertLess(d_fam["monthly"], T.deal_plan(lst, 7_000_000, 1_400_000)["monthly"])
+        d_fam = D.deal_plan(lst, 7_000_000, 1_400_000, rate=0.08, program="Семейная ипотека")
+        self.assertLess(d_fam["monthly"], D.deal_plan(lst, 7_000_000, 1_400_000)["monthly"])
         self.assertIn("Семейная ипотека", d_fam["timeline"][1]["note"])
 
     def test_deal_plan_kinds(self):
-        new = T.deal_plan({"price": 7_000_000, "is_new": True}, 6_900_000, 1_400_000)
+        new = D.deal_plan({"price": 7_000_000, "is_new": True}, 6_900_000, 1_400_000)
         self.assertTrue(new["new"] and not new["assignment"])
         self.assertTrue(any("Эскроу" in s["title"] for s in new["timeline"]))
-        assign = T.deal_plan({"price": 7_000_000, "is_new": True, "sale_type": "договор уступки"}, 6_900_000, 1_400_000)
+        assign = D.deal_plan({"price": 7_000_000, "is_new": True, "sale_type": "договор уступки"}, 6_900_000, 1_400_000)
         self.assertTrue(assign["assignment"])
-        cash = T.deal_plan({"price": 7_000_000}, 6_900_000, None)
+        cash = D.deal_plan({"price": 7_000_000}, 6_900_000, None)
         self.assertEqual((cash["cash"], cash["monthly"], cash["down_payment"]), (True, 0, 6_900_000))
 
     def test_zero_children_and_studio_survive_merge(self):
-        self.assertEqual(T.merge_profile({"city": "Казань", "children": 0})["children"], 0)
-        self.assertEqual(T.merge_profile({"rooms": 0})["rooms"], 0)
-        self.assertIs(T.merge_profile({"matcap": False})["matcap"], False)  # «маткапитала нет» — не переспрашиваем
+        self.assertEqual(PF.merge_profile({"city": "Казань", "children": 0})["children"], 0)
+        self.assertEqual(PF.merge_profile({"rooms": 0})["rooms"], 0)
+        self.assertIs(PF.merge_profile({"matcap": False})["matcap"], False)  # «маткапитала нет» — не переспрашиваем
 
 
-class PipelineFinanceStepTest(unittest.TestCase):
-    """Конвейер до конца шага «Финансы»: офлайн-модель, ответы клиента — через подтверждения."""
+class FinanceActionsTest(unittest.TestCase):
+    """Шаг «Финансы» через действия агента: модель (по сценарию) вызывает действия, клиент отвечает на карточки."""
 
     def setUp(self):
         db.configure("sqlite://")
 
-    def run_until_finance(self, query, answers):
-        async def go():
-            s = O.create_session(query, build_llm("mock"))
-            q: asyncio.Queue = asyncio.Queue()
-            s.subscribers.add(q)
-            task = asyncio.create_task(O.pipeline(s))
-            asked, said = [], []
-            try:
-                while True:
-                    ev = await asyncio.wait_for(q.get(), 5)
-                    if ev["type"] == "message" and ev["role"] == "agent":
-                        said.append(ev["text"])
-                    if ev["type"] == "confirm":
-                        asked.append(ev["kind"])
-                        approved, data = answers.get(ev["kind"], (True, {}))
-                        s.resolve(ev["kind"], approved, data)
-                    if ev["type"] == "result" and ev.get("step") == 2:
-                        return ev["data"], asked, said, s
-            finally:
-                task.cancel()
-        return asyncio.run(go())
+    def agent(self, *steps):
+        s = O.create_session("Двушка в Казани до 9 млн", ScriptedLLM(*steps))
+        s.profile = PF.merge_profile({"city": "Казань", "rooms": 2, "budget_max": 9_000_000})
+        s.red_lines_ok = True
+        return s
 
-    def test_family_with_matcap_in_savings_plan(self):
-        data, asked, said, s = self.run_until_finance(
-            "Двушка в Казани до 9 млн, ипотека, на взнос ещё копим",
-            {"family": (True, {"children": 1, "youngest_age": 4, "matcap": M.MATCAP_FIRST})})
-        self.assertIn("family", asked)
-        self.assertEqual(data["mode"], "saving")
-        self.assertEqual(data["programs"]["chosen"], "market")  # Казань, вторичка
-        self.assertEqual(data["finance"]["matcap"], M.MATCAP_FIRST)
-        self.assertEqual(data["mortgage"]["matcap"], M.MATCAP_FIRST)
-        self.assertTrue(any("Семейная ипотека здесь не подходит" in t for t in said))
-        self.assertIsNotNone(s.mortgage)
+    def test_family_matcap_and_savings_plan(self):
+        s = self.agent(call("ask_payment"), call("ask_family"), call("mortgage_programs"), call("savings_plan"), say("Готово."))
+        events = asyncio.run(drive(s, {"payment": (True, {"payment": "mortgage_saving"}),
+                                       "family": (True, {"children": 1, "youngest_age": 4, "matcap": M.MATCAP_FIRST})}))
+        finance = [e["data"] for e in events if e["type"] == "result" and e["kind"] == "finance"][-1]
+        self.assertEqual(finance["mode"], "saving")
+        self.assertEqual(finance["programs"]["chosen"], "market")  # Казань, вторичка
+        self.assertEqual(finance["finance"]["matcap"], M.MATCAP_FIRST)
+        self.assertTrue(any("Семейная ипотека здесь не подходит" in e.get("text", "") for e in events))
+        self.assertEqual(s.profile["payment"], "mortgage_saving")
 
-    def test_cash_skips_programs(self):
-        data, asked, _, _ = self.run_until_finance("Двушка в Казани до 9 млн, покупаю за наличные", {})
-        self.assertNotIn("family", asked)
-        self.assertEqual(data["mode"], "cash")
+    def test_order_is_enforced_by_code(self):
+        """Модель торопится: ипотека без семьи и поиск без финансов не выполняются — она получает объяснение."""
+        s = self.agent(call("mortgage_programs"), call("search_listings"), say("Сначала уточню семью."))
+        s.profile["payment"] = "mortgage_ready"
+        asyncio.run(drive(s))
+        results = [json.loads(m["content"]) for m in s.messages if m["role"] == "tool"]
+        self.assertIn("ask_family", results[0]["error"])
+        self.assertIn("mortgage_programs", results[1]["error"])
+
+    def test_cash_needs_no_programs(self):
+        s = self.agent(call("ask_payment"), call("mortgage_programs"), say("Ипотека не нужна."))
+        events = asyncio.run(drive(s, {"payment": (True, {"payment": "cash"})}))
+        self.assertEqual([e["data"]["mode"] for e in events if e["type"] == "result" and e["kind"] == "finance"], ["cash"])
 
 
 class QuestionsTest(unittest.TestCase):

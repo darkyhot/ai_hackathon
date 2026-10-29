@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from backend import db, sources
 from backend.agent import negotiation as N
-from backend.agent import tools as T
+from backend.agent import features as FT
 from backend.db import repo
 from backend.db.models import Listing
 from backend.sources import SourceUnavailable, cian, store
@@ -86,7 +86,7 @@ class FreshParamsAndCorrectionsTest(unittest.TestCase):
         store.remember([{**flat(1), "kitchen": 23, "description": "без балкона"}])  # Циан и описание — своё
         x = store.stored(PROFILE)[0]
         self.assertEqual((x["kitchen"], x["listed"]["kitchen"]), (15, 23))
-        self.assertIs(T.feature_status(x, "balcony"), True)
+        self.assertIs(FT.feature_status(x, "balcony"), True)
         with db.session() as s:
             self.assertIs(repo.load_corrections(s, ["cian-1"])["cian-1"]["balcony"], True)
 
@@ -97,14 +97,15 @@ class FreshParamsAndCorrectionsTest(unittest.TestCase):
         self.assertEqual(got, {"kitchen": 18.5, "year": 1975})  # площадь вне диапазона, этаж выше этажности, балкон и так есть
 
     def test_simulated_seller_is_not_saved(self):
-        from backend.agent import orchestrator as O
-        from backend.llm import build_llm
-        s = O.create_session("тест", build_llm("mock"))
+        from backend.agent import session as O
+        from backend.agent.actions.deal import apply_corrections
+        from tests.fakes import ScriptedLLM
+        s = O.create_session("тест", ScriptedLLM())
         listing = {**flat(1), "kitchen": 23}
-        asyncio.run(O.apply_corrections(s, listing, {"kitchen": 15}, persist=False))
+        asyncio.run(apply_corrections(s, listing, {"kitchen": 15}, persist=False))
         self.assertEqual((listing["kitchen"], listing["listed"]["kitchen"]), (15, 23))  # в этом диалоге — да
         self.assertEqual(store.stored(PROFILE)[0]["kitchen"], 23)  # в общей базе — нет
-        asyncio.run(O.apply_corrections(s, {**flat(1), "kitchen": 23}, {"kitchen": 15}, persist=True))
+        asyncio.run(apply_corrections(s, {**flat(1), "kitchen": 23}, {"kitchen": 15}, persist=True))
         self.assertEqual(store.stored(PROFILE)[0]["kitchen"], 15)
 
 

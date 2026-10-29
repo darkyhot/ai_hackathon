@@ -20,12 +20,18 @@ from typing import AsyncIterator, Awaitable, Callable
 
 from ..llm import LLMClient, LLMError
 from . import prompts
-from .tools import FEATURES, bargaining_arguments, feature_status, fmt, parse_money, parse_price_near
+from .features import FEATURES, feature_status
+from .numbers import fmt, parse_money, parse_price_near
+from .pricing import bargaining_arguments
 
 log = logging.getLogger(__name__)
 
-# любые сбои ответа модели -> сценарный ход
+# сбои ответа модели: сеть, не тот JSON
 LLM_FAIL = (LLMError, KeyError, IndexError, TypeError, ValueError)
+
+
+class CallError(RuntimeError):
+    """Звонок не может продолжаться: модель не ответила. Сценарных подмен нет — агент честно говорит об этом."""
 
 MAX_ROUNDS = 6
 LIVE_MODES = {"human", "phone"}  # продавец отвечает сам: в браузере или по телефону
@@ -55,7 +61,6 @@ class Negotiation:
     history: list[dict] = field(default_factory=list)
     status: str = "talking"  # talking | agreed | no_deal
     agreed_price: int | None = None
-    used_fallback: bool = False
     viewing: str | None = None
 
     @property
@@ -83,75 +88,6 @@ class Negotiation:
 
     def question_text(self) -> str:
         return "; ".join(q["question"] for q in self.questions) or "актуальна ли цена и когда готовы выйти на сделку"
-
-
-# ------------------------------------------------------------------ сценарная стратегия
-
-
-def scripted_buyer(n: Negotiation, round_no: int, phase: str) -> dict:
-    if phase == "clarify":
-        qs = n.questions
-        ask = ""
-        if qs:
-            ask = " Подскажите, пожалуйста: " + "; ".join(q["question"] for q in qs) + "?"
-        return {
-            "utterance": (
-                f"Здравствуйте! Я ИИ-ассистент покупателя из Домклика, звоню по вашей квартире: {n.listing['address']}. "
-                f"Разговор записывается. Квартира ещё продаётся?{ask}"
-            ),
-            "offer": None, "accept": False,
-        }
-    if phase == "viewing":
-        return {
-            "utterance": f"Спасибо! Давайте договоримся о просмотре: клиенту удобно {n.slots[0]} или {n.slots[1]}. Как вам удобнее?",
-            "offer": None, "accept": False,
-        }
-    a = n.args
-    if round_no == 1:
-        offer = r10k(n.target * 0.985)
-        lead = a[0] if a else "мы посмотрели рынок"
-        second = f", и {a[1]}" if len(a) > 2 else ""
-        return {"utterance": f"Спасибо за ответы. Смотрите: {lead}{second}. Готовы предложить {fmt(offer)}.",
-                "offer": offer, "accept": False}
-    prev = n.offer or n.target
-    gap = n.asking - prev
-    if n.asking <= n.authority and (gap <= 40_000 or n.seller_final):
-        return {"utterance": f"Хорошо, {fmt(n.asking)} нас устраивает. Я подтвержу цену у клиента и пришлю итоги письменно.",
-                "offer": n.asking, "accept": True}
-    if prev >= n.authority:
-        return {"utterance": f"Понимаю вас, но {fmt(n.authority)} — наш максимум. Зато сделка быстрая: ипотека одобрена, деньги через безопасные расчёты.",
-                "offer": n.authority, "accept": False}
-    offer = min(n.authority, r10k(prev + gap * 0.45))
-    extra = a[min(round_no, len(a) - 1)] if a else "покупатель готов к быстрой сделке"
-    return {"utterance": f"Понимаю. Но учтите: {extra}. Можем подняться до {fmt(offer)}.", "offer": offer, "accept": False}
-
-
-def scripted_seller(n: Negotiation, round_no: int, phase: str) -> dict:
-    s, price = n.seller, n.listing["price"]
-    if phase == "clarify":
-        answers = [s["facts"].get(q["key"]) for q in n.questions if s["facts"].get(q["key"])]
-        detail = (" " + ". ".join(a[0].upper() + a[1:] for a in answers) + ".") if answers else ""
-        return {"utterance": f"Да, продаётся.{detail} Цена {fmt(price)}, небольшой торг возможен.", "ask": price, "accept": False}
-    if phase == "viewing":
-        slot = n.slots[1] if "выходн" in s["availability"] else n.slots[0]
-        return {"utterance": f"Давайте {slot}. Позвоните за час, встречу у подъезда.", "ask": n.asking, "accept": False}
-    min_p, offer = s["min_price"], n.offer
-    if offer is None:
-        return {"utterance": f"Цена {fmt(price)}, квартира хорошая.", "ask": price, "accept": False}
-    if offer >= min_p and n.asking - offer <= 30_000:
-        return {"utterance": f"Ладно, договорились на {fmt(offer)}.", "ask": offer, "accept": True}
-    if n.seller_final:
-        return {"utterance": f"Нет, {fmt(n.asking)} — это окончательно.", "ask": n.asking, "accept": False}
-    if offer >= min_p - 60_000 and round_no >= 3:
-        final = max(min_p, r10k((n.asking + offer) / 2))
-        n.seller_final = True
-        return {"utterance": f"Давайте так: {fmt(final)} — последнее слово, если выходим на сделку в ближайшие недели.",
-                "ask": final, "accept": False}
-    new_ask = max(min_p, r10k(n.asking - (n.asking - min_p) * 0.4))
-    lines = [f"{fmt(offer)} — это слишком мало. Могу уступить до {fmt(new_ask)}.",
-             f"Квартира ухоженная, это не повод столько сбрасывать. {fmt(new_ask)} — готов обсуждать.",
-             f"Я и так иду навстречу. Хорошо, {fmt(new_ask)}, но ниже уже тяжело."]
-    return {"utterance": lines[min(round_no - 1, len(lines) - 1)], "ask": new_ask, "accept": False}
 
 
 # ------------------------------------------------------------------ LLM-ходы
@@ -212,8 +148,8 @@ async def parse_human_seller(llm: LLMClient, n: Negotiation, text: str) -> dict:
         )
         ask = normalize_price(data.get("ask"))
         accept = bool(data.get("accept"))
-    except LLM_FAIL:
-        ask, accept = None, _agrees(text)
+    except LLM_FAIL as exc:
+        raise CallError(f"модель не разобрала ответ продавца ({exc})") from exc
     if ask is not None and n.offer is not None and ask > n.offer:
         accept = False  # встречная цена, а не согласие
     return {"utterance": text, "ask": ask, "accept": accept}
@@ -264,22 +200,17 @@ def clean_corrections(raw: dict | None, x: dict) -> dict:
 
 async def extract_learned(llm: LLMClient, n: Negotiation) -> dict:
     """Что агент узнал за звонок, на какое время договорились и какие параметры продавец уточнил."""
-    if llm.name != "offline":
-        try:
-            system = (prompts.EXTRACT_CALL.replace("{labels}", ", ".join(f"«{q['label']}»" for q in n.questions))
-                      .replace("{listing}", _listing_brief(n.listing)))
-            data = await llm.chat_json([{"role": "system", "content": system}, {"role": "user", "content": n.transcript()}],
-                                       temperature=0.0, tag="extract_call")
-            facts = {str(k): str(v) for k, v in (data.get("facts") or {}).items() if v}
-            corrections = clean_corrections(data.get("corrections") if isinstance(data.get("corrections"), dict) else None,
-                                            n.listing)
-            return {"facts": facts, "viewing": n.viewing or data.get("viewing"), "corrections": corrections}
-        except LLM_FAIL as exc:
-            log.warning("extract fallback: %s", exc)
-    facts = {}
-    if n.mode == "auto":
-        facts = {q["label"]: n.seller["facts"][q["key"]] for q in n.questions if q["key"] in n.seller["facts"]}
-    return {"facts": facts, "viewing": n.viewing, "corrections": {}}
+    try:
+        system = (prompts.EXTRACT_CALL.replace("{labels}", ", ".join(f"«{q['label']}»" for q in n.questions))
+                  .replace("{listing}", _listing_brief(n.listing)))
+        data = await llm.chat_json([{"role": "system", "content": system}, {"role": "user", "content": n.transcript()}],
+                                   temperature=0.0, tag="extract_call")
+    except LLM_FAIL as exc:  # итог звонка не разобран — расшифровка остаётся на экране, факты не выдумываем
+        log.warning("итог звонка не разобран: %s", exc)
+        return {"facts": {}, "viewing": n.viewing, "corrections": {}}
+    facts = {str(k): str(v) for k, v in (data.get("facts") or {}).items() if v}
+    corrections = clean_corrections(data.get("corrections") if isinstance(data.get("corrections"), dict) else None, n.listing)
+    return {"facts": facts, "viewing": n.viewing or data.get("viewing"), "corrections": corrections}
 
 
 def normalize_price(v) -> int | None:
@@ -372,26 +303,29 @@ Event = dict
 SellerInput = Callable[[], Awaitable[str | None]]
 
 
+async def _model(step, what: str):
+    """Ход модели с одним повтором; не ответила — звонок останавливается (CallError)."""
+    for attempt in range(2):
+        try:
+            return await step()
+        except LLM_FAIL as exc:
+            log.warning("%s: %s", what, exc)
+            if attempt:
+                raise CallError(f"модель не ответила ({what})") from exc
+
+
 async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = None) -> AsyncIterator[Event]:
-    """Асинхронный генератор событий звонка: call_phase / turn / guard / price / call_end."""
-    use_llm = llm.name != "offline"
+    """Асинхронный генератор событий звонка: call_phase / turn / guard / price / call_end. Бросает CallError."""
 
     def price_event() -> Event:
         return {"type": "price", "ask": n.asking, "offer": n.offer, "savings": n.listing["price"] - n.asking,
                 "base": n.listing["price"]}
 
     async def agent_turn(round_no: int, phase: str):
-        move, notes = None, []
-        if use_llm:
-            try:
-                move = await llm_buyer(llm, n, round_no, phase)
-                notes = guard_buyer(n, move, phase, first=not n.history)
-            except LLM_FAIL as exc:
-                log.warning("buyer LLM fallback: %s", exc)
-                move, n.used_fallback = None, True
-        if move is None:
-            move = scripted_buyer(n, round_no, phase)
-            notes = guard_buyer(n, move, phase, first=not n.history)
+        async def step():
+            move = await llm_buyer(llm, n, round_no, phase)
+            return move, guard_buyer(n, move, phase, first=not n.history)
+        move, notes = await _model(step, "реплика ассистента")
         if move["offer"] is not None:
             n.offer = move["offer"]
         n.history.append({"speaker": "agent", "text": move["utterance"], "offer": move["offer"]})
@@ -411,17 +345,11 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
             else:
                 smove = {"utterance": text, "ask": n.asking, "accept": False}
         else:
-            smove = None
-            if use_llm:
-                try:
-                    smove = await llm_seller(llm, n, phase)
-                    guard_seller(n, smove)
-                except LLM_FAIL as exc:
-                    log.warning("seller LLM fallback: %s", exc)
-                    smove, n.used_fallback = None, True
-            if smove is None:
-                smove = scripted_seller(n, round_no, phase)
-                guard_seller(n, smove)
+            async def step():
+                move = await llm_seller(llm, n, phase)
+                guard_seller(n, move)
+                return move
+            smove = await _model(step, "реплика ИИ-продавца")
             if phase != "bargain":
                 smove["ask"], smove["accept"] = n.asking if phase == "viewing" else smove["ask"], False
         n.history.append({"speaker": "seller", "text": smove["utterance"], "ask": smove["ask"]})
@@ -507,7 +435,6 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
         "price": n.agreed_price or n.asking,
         "savings": n.listing["price"] - (n.agreed_price or n.asking),
         "within_authority": (n.agreed_price or n.asking) <= n.authority,
-        "fallback": n.used_fallback,
         "learned": learned["facts"],
         "viewing": learned["viewing"],
         "corrections": learned["corrections"],

@@ -90,7 +90,9 @@ async def verify(listing: dict) -> dict:
     store.page_checked(listing["id"], page["alive"], page["note"])
     fresh = cian.normalize(page["offer"], listing["city"], new=bool(listing.get("is_new"))) if page["offer"] else None
     if fresh and fresh["id"] == listing["id"]:
-        fresh["url"] = fresh.get("url") or listing.get("url")  # на странице объявления своей ссылки нет
+        # страница объявления отдаёт не все поля (ссылки, иногда адреса нет) — пустое не затирает известное
+        known = {k: v for k, v in listing.items() if k not in ("listed", "confirmed", "stored_at", "nearby")}
+        fresh = {**known, **{k: v for k, v in fresh.items() if v not in (None, "", [])}}
         store.remember([fresh])
         store.apply_corrections([fresh])
     else:

@@ -34,20 +34,18 @@ MIRRORS = [
 # без своего User-Agent главный сервер отвечает 406
 HEADERS = {"User-Agent": "domclick-agent-prototype/0.2 (hackathon demo)"}
 
-# ключ: (как назвать, что искать в словах клиента, запросы OSM)
+# ключ: (как назвать, запросы OSM)
 POI = {
-    "school": ("школа", r"школ", ['nwr["amenity"="school"]']),
-    "kindergarten": ("детский сад", r"детск\w* сад|садик|детсад", ['nwr["amenity"="kindergarten"]']),
-    "clinic": ("поликлиника", r"поликлиник|медцентр|медицинск\w* центр|врач", ['nwr["amenity"~"^(clinic|doctors)$"]']),
-    "hospital": ("больница", r"больниц|госпитал", ['nwr["amenity"="hospital"]']),
-    "park": ("парк", r"парк(?!инг|овк)|сквер|зел[её]н\w* зон|\bлес\b|лесопарк|природ",
-             ['nwr["leisure"~"^(park|garden|nature_reserve)$"]["name"]', 'nwr["landuse"="forest"]["name"]']),
-    "water": ("вода", r"\bвод[аеуы]\b|у воды|озер|\bрек[аиуе]\b|речк|пруд|набережн|водохранилищ|залив|канал",
-              ['nwr["natural"="water"]["name"]', 'way["waterway"~"^(river|canal)$"]["name"]']),
-    "pharmacy": ("аптека", r"аптек", ['nwr["amenity"="pharmacy"]']),
-    "shop": ("супермаркет", r"магазин|супермаркет|продукт", ['nwr["shop"="supermarket"]']),
-    "mall": ("торговый центр", r"торгов\w* центр|\bтц\b|молл", ['nwr["shop"="mall"]']),
-    "fitness": ("фитнес", r"фитнес|спортзал|тренаж[её]р|бассейн", ['nwr["leisure"~"^(fitness_centre|sports_centre)$"]']),
+    "school": ("школа", ['nwr["amenity"="school"]']),
+    "kindergarten": ("детский сад", ['nwr["amenity"="kindergarten"]']),
+    "clinic": ("поликлиника", ['nwr["amenity"~"^(clinic|doctors)$"]']),
+    "hospital": ("больница", ['nwr["amenity"="hospital"]']),
+    "park": ("парк", ['nwr["leisure"~"^(park|garden|nature_reserve)$"]["name"]', 'nwr["landuse"="forest"]["name"]']),
+    "water": ("вода", ['nwr["natural"="water"]["name"]', 'way["waterway"~"^(river|canal)$"]["name"]']),
+    "pharmacy": ("аптека", ['nwr["amenity"="pharmacy"]']),
+    "shop": ("супермаркет", ['nwr["shop"="supermarket"]']),
+    "mall": ("торговый центр", ['nwr["shop"="mall"]']),
+    "fitness": ("фитнес", ['nwr["leisure"~"^(fitness_centre|sports_centre)$"]']),
 }
 # протяжённые объекты: храним контур (прореженный), расстояние — до берега или края парка
 AREAS = {"park", "water"}
@@ -58,13 +56,6 @@ POI_TTL_DAYS = 30  # что рядом с домом: пересчитываем
 LIVE_TIMEOUT = 60  # с — главный сервер Overpass бывает задумчив
 
 _live_cache: dict[tuple[float, float, str], dict | None] = {}
-
-
-def wanted(*texts: str | None) -> list[str]:
-    """Что клиент хочет рядом с домом («рядом школа», «поликлиника недалеко»)."""
-    t = " ".join(x for x in texts if x).lower().replace("ё", "е")
-    return [k for k, (_, pattern, _) in POI.items()
-            if re.search(pattern.replace("[её]", "е"), t) and not re.search(rf"без\s+(?:{pattern.replace('[её]', 'е')})", t)]
 
 
 def distance_m(lat1: float, lng1: float, lat2: float, lng2: float) -> int:
@@ -136,7 +127,7 @@ def _query(kinds: list[str], areas_of_search: list[str], timeout: int) -> str:
     """Один запрос на все виды: у точечных (школа, аптека) — только центр, у парков и воды — контур."""
     def union(want_areas: bool) -> str:
         return "".join(f"{f}{where};" for k in kinds if (k in AREAS) == want_areas
-                       for f in POI[k][2] for where in areas_of_search)
+                       for f in POI[k][1] for where in areas_of_search)
     return (f"[out:json][timeout:{timeout}];({union(False)})->.p;({union(True)})->.a;"
             ".p out center tags qt;.a out geom tags qt;")
 
@@ -221,7 +212,7 @@ async def _live(listings: list[dict], kinds: list[str]) -> bool:
 
 def _matches(tags: dict, kind: str) -> bool:
     """Подходит ли объект OSM под один из запросов вида."""
-    for flt in POI[kind][2]:
+    for flt in POI[kind][1]:
         for key, op, value in re.findall(r'\["(\w+)"(?:(=|~)"([^"]*)")?\]', flt):
             v = tags.get(key)
             if v is None or (op == "=" and v != value) or (op == "~" and not re.search(value, v)):

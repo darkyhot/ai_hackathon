@@ -23,11 +23,11 @@ FIELDS = {"kitchen": float, "area": float, "floor": int, "floors": int, "year": 
 
 
 def _features(x: dict) -> list[tuple[str, str, object, str]]:
-    from ..agent import tools as T  # агент использует источники, а не наоборот: импорт по месту
+    from ..agent.features import FEATURES, feature_status  # агент использует источники, а не наоборот: импорт по месту
 
     has_counts = {"balcony": x.get("balconies") is not None, "balcony_loggia": x.get("loggias") is not None,
                   "separate_wc": x.get("separate_wc") is not None}
-    return [(x["id"], key, T.feature_status(x, key), "cian" if has_counts.get(key) else "text") for key in T.FEATURES]
+    return [(x["id"], key, feature_status(x, key), "cian" if has_counts.get(key) else "text") for key in FEATURES]
 
 
 def remember(items: list[dict]) -> dict | None:

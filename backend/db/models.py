@@ -64,7 +64,7 @@ class AuthSession(Base):
 
 
 class Chat(Base):
-    """Диалог с агентом. Профиль — что агент понял о запросе: с него продолжаем диалог после паузы."""
+    """Диалог с агентом. Профиль и память агента — с них диалог продолжается после паузы или перезапуска."""
     __tablename__ = "chats"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -73,6 +73,7 @@ class Chat(Base):
     title: Mapped[str] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(20), default="running")  # running | completed | cancelled | … (done-статусы агента)
     profile: Mapped[dict | None] = mapped_column(JSON)
+    memory: Mapped[list | None] = mapped_column(JSON)  # разговор агента с моделью (сообщения и действия) — для продолжения
     last_seq: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
