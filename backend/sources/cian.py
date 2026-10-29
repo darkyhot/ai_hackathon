@@ -147,6 +147,12 @@ def _address(geo: dict, city: str) -> str:
     return text.split(f"{city},")[-1].strip() or text
 
 
+def _count(o: dict, *keys: str) -> int | None:
+    """Сумма счётчиков из объявления; None — площадка поле не прислала."""
+    values = [o[k] for k in keys if isinstance(o.get(k), int)]
+    return sum(values) if values else None
+
+
 def normalize(o: dict, city: str, today: date | None = None) -> dict | None:
     today = today or date.today()
     terms = o.get("bargainTerms") or {}
@@ -196,6 +202,9 @@ def normalize(o: dict, city: str, today: date | None = None) -> dict | None:
         "floors": building.get("floorsCount"),
         "year": building.get("buildYear"),
         "condition": condition,
+        "balconies": _count(o, "balconiesCount", "loggiasCount"),  # балконы и лоджии вместе
+        "loggias": _count(o, "loggiasCount"),
+        "separate_wc": _count(o, "separateWcsCount"),
         "lat": coords.get("lat"),
         "lng": coords.get("lng"),
         "material": MATERIAL.get(building.get("materialType")),

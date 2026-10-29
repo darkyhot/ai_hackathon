@@ -6,10 +6,12 @@
 import asyncio
 import json
 import unittest
+from unittest.mock import patch
 
 import httpx
 
 from backend import economics as E
+from backend import geo
 from backend.agent import finance as F
 from backend.agent import negotiation as N
 from backend.agent import preferences as P
@@ -157,6 +159,25 @@ class NegotiationTest(unittest.TestCase):
         offers = [e["offer"] for e in events if e["type"] == "turn" and e["speaker"] == "agent" and e["offer"]]
         self.assertEqual(offers, sorted(offers), "агент не должен откатывать предложение")
 
+    def test_phone_call_waits_for_seller_and_stops_on_hangup(self):
+        x = listing()
+        n = N.Negotiation(listing=x, seller=seller_sim.build(x), fair=T.fair_price(x, [x]), authority=7_300_000,
+                          questions=T.missing_info(x), slots=T.client_slots(), mode="phone")
+        answers = iter(["Ремонт свежий, документы готовы", N.HANGUP])
+
+        async def seller_input():
+            return next(answers, None)
+
+        async def go():
+            return [e async for e in N.run(build_llm("mock"), n, human_input=seller_input)]
+
+        events = run(go())
+        self.assertEqual(sum(e["type"] == "await_seller" for e in events), 3)  # уточнение, торг, просмотр
+        said = [e["text"] for e in events if e["type"] == "turn" and e["speaker"] == "seller"]
+        self.assertEqual(said[0], "Ремонт свежий, документы готовы")
+        self.assertNotIn(N.HANGUP, said)
+        self.assertEqual(events[-1]["status"], "no_deal")
+
     def test_guards(self):
         x = listing()
         n = N.Negotiation(listing=x, seller=seller_sim.build(x), fair=T.fair_price(x, [x]), authority=7_300_000)
@@ -237,6 +258,108 @@ class EconomicsTest(unittest.TestCase):
         off = E.unit(E.Inputs(fin_enabled=False))
         self.assertGreater(on["roi"], off["roi"])
         self.assertEqual(off["roi"], off["roi_core"])
+
+
+class WishesAndMapTest(unittest.TestCase):
+    def test_features_from_request_and_description(self):
+        self.assertEqual(T.wanted_features("двушка с балконом и гардеробной"), ["balcony", "wardrobe"])
+        self.assertEqual(T.wanted_features("можно без балкона"), [])
+        x = listing(description="Есть гардеробная, лоджия застеклена")
+        self.assertTrue(T.feature_status(x, "wardrobe"))
+        self.assertIsNone(T.feature_status(listing(description="Хорошая квартира"), "wardrobe"))
+        self.assertFalse(T.feature_status(listing(description="Квартира без балкона"), "balcony"))
+        asked = T.missing_info(listing(description=""), 4, ["wardrobe"])
+        self.assertEqual(asked[0]["label"], "гардеробная")  # агент спросит у продавца
+
+    def test_named_district_matches_any_case(self):
+        self.assertTrue(T.in_districts({"district": "Черёмушки"}, ["черемушек"]))
+        self.assertFalse(T.in_districts({"district": "Ясенево"}, ["Черёмушки"]))
+
+    def test_nearby_from_map(self):
+        self.assertEqual(geo.wanted("рядом школа и поликлиника, есть парковка"), ["school", "clinic"])
+        self.assertEqual(geo.wanted("хочу у воды, рядом больница"), ["hospital", "water"])
+        # ответ Overpass: школа (центр здания) и река (контур)
+        elements = [
+            {"type": "way", "id": 1, "tags": {"amenity": "school", "name": "Школа № 1"}, "center": {"lat": 55.7905, "lon": 49.1205}},
+            {"type": "way", "id": 2, "tags": {"waterway": "river", "name": "Казанка"},
+             "geometry": [{"lat": 55.800, "lon": 49.100}, {"lat": 55.800, "lon": 49.140}]},
+        ]
+        queries = []
+
+        async def fake_overpass(query, timeout):
+            queries.append(query)
+            return elements
+
+        x = listing(id="m1", lat=55.7900, lng=49.1200)   # ~1,1 км от реки, школа в 70 м
+        near_river = listing(id="m2", lat=55.7980, lng=49.1200)
+        geo._live_cache.clear()
+        with patch.object(geo, "_overpass", fake_overpass):
+            self.assertTrue(run(geo.nearby([x, near_river], ["school", "water"])))
+            self.assertTrue(run(geo.nearby([x], ["school"])))  # повтор — из кэша
+        self.assertEqual(len(queries), 1)  # один запрос на обе квартиры и оба вида
+        self.assertEqual(x["nearby"]["school"]["name"], "Школа № 1")
+        self.assertLess(x["nearby"]["school"]["dist"], 100)
+        self.assertIsNone(x["nearby"]["water"])                       # реки в 1 км нет
+        self.assertLess(near_river["nearby"]["water"]["dist"], 250)  # до берега, а не до центра реки
+        self.assertFalse(geo.has_all(x, ["school", "water"]))
+
+    def test_balcony_and_loggia_means_both(self):
+        self.assertEqual(T.wanted_features("с лоджией и балконом"), ["balcony_loggia"])
+        self.assertEqual(T.wanted_features("балкон или лоджия"), ["balcony"])
+        self.assertEqual(T.merge_features(["balcony"], ["balcony_loggia"]), ["balcony_loggia"])
+        both = listing(balconies=2, loggias=1)
+        only_loggia = listing(balconies=1, loggias=1)
+        by_text = listing(description="Застеклённый балкон и лоджия")
+        self.assertEqual([T.feature_status(x, "balcony_loggia") for x in (both, only_loggia, by_text)], [True, False, True])
+
+    def test_selection_keeps_only_confirmed_wishes(self):
+        from backend.agent import orchestrator as O
+        prefs = P.Prefs(features=["wardrobe"], poi=["school"])
+        good = listing(description="Есть гардеробная", nearby={"school": {"name": "Школа", "dist": 300}})
+        no_school = listing(description="Есть гардеробная", nearby={"school": None})
+        unknown = listing(description="Хорошая квартира", nearby={"school": {"name": "Школа", "dist": 300}})
+        self.assertEqual([O.fits(x, prefs) for x in (good, no_school, unknown)], [True, False, False])
+        self.assertTrue(O.fits(no_school, prefs, map_ok=False))  # карта не ответила — школу не проверяем
+        self.assertEqual(O.drop_wishes("Без условия: гардеробная", prefs), ["гардеробная"])
+        self.assertEqual(prefs.features, [])
+        self.assertEqual(O.drop_wishes("Показать без этих условий", prefs), ["школа"])
+
+    def test_seller_reply_with_price_skips_llm(self):
+        x = listing()
+        n = N.Negotiation(listing=x, seller=seller_sim.build(x), fair=T.fair_price(x, [x]), authority=7_300_000)
+        n.offer = 7_200_000
+
+        class Boom:
+            name = "deepseek"
+
+            async def chat_json(self, *a, **k):
+                raise AssertionError("модель не нужна")
+
+        move = run(N.parse_human_seller(Boom(), n, "Меньше 7 500 000 не отдам"))
+        self.assertEqual(move["ask"], 7_500_000)
+        self.assertFalse(move["accept"])
+        self.assertTrue(run(N.parse_human_seller(Boom(), n, "Ладно, согласен"))["accept"])
+
+    def test_counter_price_without_mln_is_not_agreement(self):
+        """Агент: 23,4 млн. Продавец: «Нет, давай 23 600» — это встречная цена, а не согласие на 23,4."""
+        x = listing(price=23_650_000)
+        n = N.Negotiation(listing=x, seller=seller_sim.build(x), fair=T.fair_price(x, [x]), authority=23_650_000)
+        n.offer = 23_400_000
+
+        class Boom:
+            name = "deepseek"
+
+            async def chat_json(self, *a, **k):
+                raise AssertionError("модель не нужна")
+
+        move = run(N.parse_human_seller(Boom(), n, "Нет, давай 23 600."))
+        self.assertEqual((move["ask"], move["accept"]), (23_600_000, False))
+        self.assertEqual(run(N.parse_human_seller(Boom(), n, "Хорошо, 23,4 — по рукам"))["accept"], True)
+        # агент «принимает», но вслух называет не ту цену — реплику исправляем
+        n.asking = 23_600_000
+        agent = {"utterance": "Хорошо, фиксирую 23 400 000 ₽.", "offer": None, "accept": True}
+        N.guard_buyer(n, agent, "bargain", first=False)
+        self.assertIn("23 600 000", agent["utterance"])
 
 
 if __name__ == "__main__":

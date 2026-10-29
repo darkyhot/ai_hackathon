@@ -166,9 +166,27 @@ button, input, textarea { font: inherit; color: inherit; }
 .confirm.is-done .actions { display: none; }
 .confirm .verdict { font-size: 13px; color: var(--ink-3); }
 .confirm label { font-size: 13px; color: var(--ink-2); display: flex; flex-direction: column; gap: 4px; }
-.confirm input[type="number"] {
+.confirm input[type="number"], .confirm input[type="tel"] {
   border: 1px solid var(--line); border-radius: var(--radius-s); padding: 8px 10px; background: var(--canvas); width: 100%;
 }
+.dial-note { font-size: 13px; color: var(--ink-2); }
+.map-wrap { margin: 0 0 18px; }
+.map { position: relative; z-index: 0; isolation: isolate; height: 320px; border-radius: var(--radius-m); overflow: hidden; background: var(--canvas); border: 1px solid var(--line); }
+.map-fallback { padding: 16px; font-size: 13px; color: var(--ink-3); }
+.map-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 8px 2px 0; font-size: 12.5px; color: var(--ink-2); }
+.map-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex: none; margin-right: 5px; vertical-align: 0; }
+.map-legend .dot { margin-right: 0; }
+.pin-dot { display: inline-block; width: 22px; height: 12px; border-radius: 6px; background: var(--green); }
+.flat-pin { background: none; border: 0; }
+.flat-pin span { display: inline-block; transform: translate(-50%, -50%); padding: 3px 8px; border-radius: 999px; background: var(--green); color: #fff;
+  font: 700 12px/1.2 Onest, system-ui, sans-serif; white-space: nowrap; box-shadow: 0 0 0 2px #fff, 0 2px 6px rgb(0 0 0 / .25); }
+.offer.is-flash { box-shadow: 0 0 0 3px var(--green); transition: box-shadow .2s; }
+.features { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
+.feat { font-size: 12.5px; padding: 3px 9px; border-radius: 999px; background: var(--canvas); color: var(--ink-2); }
+.feat.is-yes { background: var(--green-soft); color: var(--green-strong); }
+.feat.is-no { color: var(--ink-3); text-decoration: line-through; }
+.dial-note.mic-error { color: var(--red); }
 .redlines { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; font-size: 13px; }
 .redlines dt { color: var(--ink-3); }
 .redlines dd { margin: 0; font-weight: 500; }
@@ -583,3 +601,55 @@ table.scen td.neg { color: var(--red); }
 .market-scale .budget { position: absolute; top: 0; height: 32px; width: 2px; background: var(--green); }
 .market-scale .budget span { position: absolute; top: -18px; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 600; color: var(--green-strong); white-space: nowrap; }
 .market-legend { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-3); margin-top: 4px; }
+
+/* ---------- голосовой режим: разговор без кнопок */
+.talk-btn {
+  display: inline-flex; align-items: center; gap: 6px; height: 44px; padding: 0 14px; flex: none;
+  border: 1px solid var(--green-line); border-radius: 999px; background: var(--green-soft); color: var(--green-strong);
+  font-weight: 600; cursor: pointer; transition: background .15s ease;
+}
+.talk-btn:hover { background: color-mix(in srgb, var(--green-soft) 70%, var(--green-line)); }
+.talk {
+  border-top: 1px solid var(--line); padding: 16px; display: flex; align-items: center; gap: 14px;
+  background: linear-gradient(180deg, var(--surface), var(--green-soft));
+}
+.talk-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.talk-text strong { font-size: 16px; }
+.talk-text span { font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
+.talk-orb {
+  --lvl: 0; position: relative; width: 64px; height: 64px; flex: none; border: 0; padding: 0;
+  border-radius: 50%; background: transparent; cursor: pointer; display: grid; place-items: center;
+}
+.talk-core {
+  width: 48px; height: 48px; border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, #7ed33b, #21a038 45%, #13c3b5 80%, #1a8fe0);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--green) 35%, transparent);
+  transform: scale(calc(1 + var(--lvl) * .22)); transition: transform .1s linear;
+}
+.talk-ring {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--green) 45%, transparent);
+  transform: scale(calc(1 + var(--lvl) * .3)); opacity: calc(.35 + var(--lvl) * .65);
+  transition: transform .1s linear, opacity .1s linear;
+}
+.talk[data-state="listening"] .talk-ring { animation: talk-breathe 2.4s ease-in-out infinite; }
+.talk[data-state="processing"] .talk-ring {
+  border-color: transparent; border-top-color: var(--green); border-right-color: var(--blue);
+  animation: talk-spin .9s linear infinite;
+}
+.talk[data-state="speaking"] .talk-core { animation: talk-speak 1.1s ease-in-out infinite; }
+.talk[data-state="speaking"] .talk-ring { animation: talk-wave 1.1s ease-out infinite; }
+.talk[data-state="waiting"] .talk-core { filter: grayscale(.8); opacity: .6; }
+@keyframes talk-breathe { 50% { transform: scale(1.08); opacity: .6; } }
+@keyframes talk-spin { to { transform: rotate(360deg); } }
+@keyframes talk-speak { 50% { transform: scale(1.1); } }
+@keyframes talk-wave { from { transform: scale(.9); opacity: .9; } to { transform: scale(1.35); opacity: 0; } }
+.offer-no {
+  position: absolute; top: 10px; right: 10px; min-width: 26px; height: 26px; padding: 0 6px; border-radius: 999px;
+  display: grid; place-items: center; background: var(--surface); color: var(--ink); font-weight: 700; font-size: 13px;
+  box-shadow: var(--shadow);
+}
+.talk[data-state="thinking"] .talk-ring {
+  border-color: transparent; border-top-color: var(--green); border-right-color: var(--blue);
+  animation: talk-spin 1.4s linear infinite;
+}

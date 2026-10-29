@@ -37,5 +37,12 @@ class Settings:
     gigachat_verify_ssl: bool = _bool("GIGACHAT_VERIFY_SSL", True)
     gigachat_ca_bundle: str = os.getenv("GIGACHAT_CA_BUNDLE", "")
 
+    # МТС Exolve: настоящий звонок продавцу (синтез речи + SIP через WebRTC)
+    exolve_api_key: str = os.getenv("EXOLVE_API_KEY", "")
+    exolve_voice: int = int(os.getenv("EXOLVE_VOICE", "13") or 13)  # 13 — Кирилл
+    seller_phone: str = os.getenv("SELLER_PHONE", "")
+    # PIN для звонков на публичном сервере: без него любой посетитель звонил бы за ваш счёт
+    phone_pin: str = os.getenv("PHONE_PIN", "")
+
 
 settings = Settings()

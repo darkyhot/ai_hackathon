@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from .. import economics, sources
+from .. import economics, geo, sources
 from ..llm import LLMClient, LLMError
 from . import finance as F
 from . import negotiation as N
@@ -45,6 +46,7 @@ class Session:
     opened: dict[str, int] = field(default_factory=dict)
     journal: dict = field(default_factory=dict)
     llm_degraded: bool = False
+    map_warned: bool = False
 
     # ------------------------------------------------------------- события
     async def emit(self, type_: str, **payload: Any) -> None:
@@ -126,6 +128,12 @@ async def parse_request(s: Session, text: str, base: dict | None = None) -> dict
         await mark_degraded(s, exc)
         profile = T.merge_profile(T.parse_request_rules(text), base)
         profile["parsed_by"] = "rules"
+    # удобства («с балконом», «гардеробная») ищем и правилами: модель их иногда теряет
+    profile["features"] = T.merge_features((base or {}).get("features", []),
+                                           T.wanted_features(text, *profile.get("wishes") or []))
+    # что должно быть рядом («школа рядом», «поликлиника») — проверим по карте
+    profile["poi"] = list(dict.fromkeys([*(base or {}).get("poi", []), *(["school"] if profile.get("near_school") else []),
+                                         *geo.wanted(text, *profile.get("wishes") or [])]))
     return profile
 
 
@@ -135,10 +143,85 @@ def ranked(pool: list[dict], meta: dict[str, dict], prefs: P.Prefs) -> list[dict
     return sorted(pool, key=lambda x: meta[x["id"]]["total"], reverse=True)
 
 
-def card(x: dict, meta: dict) -> dict:
+def call_questions(x: dict, prefs: P.Prefs, limit: int = 3) -> list[dict]:
+    """Что спросить у продавца: пробелы в объявлении (пожелания клиента уже проверены в подборке)."""
+    return T.missing_info(x, limit, prefs.features)
+
+
+def wishes_text(prefs: P.Prefs) -> str:
+    """«с балконом или лоджией, гардеробной, рядом: школа, вода»."""
+    parts = []
+    if prefs.features:
+        parts.append("с " + ", ".join(T.FEATURE_WITH[k] for k in prefs.features))
+    if prefs.poi:
+        parts.append("рядом: " + ", ".join(geo.POI[k][0] for k in prefs.poi))
+    return ", ".join(parts)
+
+
+def fits(x: dict, prefs: P.Prefs, map_ok: bool = True) -> bool:
+    """Квартира выполняет все пожелания: удобства подтверждены объявлением, нужное — в 1 км по карте."""
+    if any(T.feature_status(x, k) is not True for k in prefs.features):
+        return False
+    return not map_ok or geo.has_all(x, prefs.poi)
+
+
+def drop_wishes(text: str, prefs: P.Prefs) -> list[str]:
+    """Клиент снял условия: «Без условий», «Без условия: гардеробная». Возвращает снятые названия."""
+    t = text.lower().replace("ё", "е")
+    if not re.search(r"без (?:этих )?услови|не важно", t):
+        return []
+    every = re.search(r"без условий|без этих|все не важно", t)
+    dropped = []
+    for k in list(prefs.features):
+        if every or T.FEATURES[k][0].split()[0][:6] in t:
+            prefs.features.remove(k)
+            dropped.append(T.FEATURES[k][0])
+    for k in list(prefs.poi):
+        if every or geo.POI[k][0].replace("ё", "е").split()[0][:6] in t:
+            prefs.poi.remove(k)
+            dropped.append(geo.POI[k][0])
+    return dropped
+
+
+def card(x: dict, meta: dict, prefs: P.Prefs) -> dict:
     m = meta[x["id"]]
-    return {**x, "fair": m["fair"], "score": m["total"], "missing": [q["label"] for q in T.missing_info(x, 4)
-                                                                       if q["key"] != "owners"]}
+    return {**x, "fair": m["fair"], "score": m["total"],
+            "features": [{"label": T.FEATURES[k][0], "status": T.feature_status(x, k)} for k in prefs.features],
+            "nearby": geo.summary(x, prefs.poi),
+            "unchecked": [geo.POI[k][0] for k in prefs.poi if k not in (x.get("nearby") or {})],
+            "missing": [q["label"] for q in call_questions(x, prefs, 4) if q["key"] != "owners"]}
+
+
+async def check_map(s: Session, listings: list[dict], announce: bool = False) -> bool:
+    """Находит по карте, что рядом с квартирами (школы, парки, вода…). False — проверить не удалось."""
+    if not s.prefs.poi or not listings:
+        return True
+    if announce:
+        await s.say("Проверяю по карте, что рядом: " + ", ".join(geo.POI[k][0] for k in s.prefs.poi) + ".")
+    ok = await geo.nearby(listings, s.prefs.poi)
+    if not ok and not s.map_warned:
+        s.map_warned = True
+        await s.say("Не смог проверить по карте, что рядом: сервис карты OpenStreetMap не ответил. "
+                    "Показываю квартиры без этой проверки — честно отмечу это на карточках.")
+    return ok
+
+
+async def narrow_to_wishes(s: Session, pool: list[dict], before: tuple[list, list], map_ok: bool) -> list[dict]:
+    """Клиент добавил пожелание уже в подборке: оставляем только подходящие или честно говорим, что таких нет."""
+    if (s.prefs.features, s.prefs.poi) == before:
+        return pool
+    new_poi = [k for k in s.prefs.poi if k not in before[1]]
+    if new_poi:
+        map_ok = await check_map(s, pool, announce=True) and map_ok
+    good = [x for x in pool if fits(x, s.prefs, map_ok) or x["id"] in s.prefs.liked]
+    want = wishes_text(s.prefs)
+    if any(x["id"] not in s.prefs.liked for x in good):
+        await s.say(f"Оставил квартиры {want}: {len(good)} из {len(pool)}.")
+        return good
+    s.prefs.features, s.prefs.poi = list(before[0]), list(before[1])
+    await s.say(f"Среди найденных квартир {want} нет. Чтобы искать с этим условием заново — и проверить чуть дороже, "
+                "начните новый запрос с этим пожеланием.")
+    return pool
 
 
 async def score_into(pool: list[dict], comps: list[dict], profile: dict, meta: dict) -> None:
@@ -200,6 +283,7 @@ async def pipeline(s: Session) -> None:
             continue
         elif profile.get("budget_max") is None:
             if market is None:
+                await s.say(f"Смотрю цены на Циане ({profile['city']}, {T.rooms_text(profile['rooms'])}), чтобы подсказать бюджет…")
                 market = await sources.market(profile)
             question = T.budget_question(profile, market)
             chips = T.budget_chips(market) + ["Не знаю — посчитай по моим доходам"]
@@ -292,38 +376,114 @@ async def pipeline(s: Session) -> None:
             return
     await s.step(2, "done")
 
-    # 3. Поиск (если ничего нет — предлагаем, что поменять, и ищем снова)
+    # 3. Поиск: сначала целые квартиры в рамках, потом район и пожелания. Чего нет — говорим честно и предлагаем, что поменять.
     await s.step(3, "active")
-    for attempt in range(4):
+    s.prefs.features = list(profile.get("features") or [])
+    s.prefs.poi = list(profile.get("poi") or [])
+    map_ok = True
+    named: list[str] = []
+    strict = False
+    for attempt in range(5):
         where = profile["city"] + (f", {profile['okrug']}" if profile.get("okrug") else "")
         await s.say(f"Ищу на Циане: {where}, {T.rooms_text(profile['rooms'])}, до {T.fmt(profile['budget_max'])}.")
         listings, report = await sources.collect(profile)
         pool = [x for x in listings if T.passes_hard_filters(x, profile)]
-        if pool:
-            break
-        await s.emit("result", step=3, kind="search", data={"report": report, "total": len(listings), "matched": 0, "rows": []})
-        if report and report[0]["status"] == "unavailable":
-            await s.say(f"Циан сейчас не отдаёт объявления ({report[0]['note']}). Попробуйте чуть позже.")
-            await s.emit("done", status="empty")
-            return
-        m = await sources.market(profile)
-        question = (f"Целых квартир ({T.rooms_text(profile['rooms'])}, {where}) до {T.fmt(profile['budget_max'])} сейчас нет — "
-                    "доли и комнаты я не показываю.")
-        chips = []
-        if m:
-            cheapest = int(-(-m["min"] // 100_000) * 100_000)
-            question += f" Самые доступные — от {T.mln(m['min'])}, обычно {T.mln(m['p25'])}–{T.mln(m['p75'])}."
-            chips.append(f"Бюджет до {T.mln(cheapest)}")
-        if profile["rooms"] and profile["rooms"] > 1:
-            chips.append(f"{profile['rooms'] - 1}-комнатные")
-        if profile.get("okrug"):
-            chips.append(f"Искать по всему городу ({profile['city']})")
-        question += " Что меняем?"
+        page = 1
+        if not pool:
+            await s.emit("result", step=3, kind="search", data={"report": report, "total": len(listings), "matched": 0, "rows": []})
+            if report and report[0]["status"] == "unavailable":
+                await s.say(f"Циан сейчас не отдаёт объявления ({report[0]['note']}). Попробуйте чуть позже.")
+                await s.emit("done", status="empty")
+                return
+            m = await sources.market(profile)
+            question = (f"Целых квартир ({T.rooms_text(profile['rooms'])}, {where}) до {T.fmt(profile['budget_max'])} сейчас нет — "
+                        "доли и комнаты я не показываю.")
+            chips = []
+            if m:
+                cheapest = int(-(-m["min"] // 100_000) * 100_000)
+                question += f" Самые доступные — от {T.mln(m['min'])}, обычно {T.mln(m['p25'])}–{T.mln(m['p75'])}."
+                chips.append(f"Бюджет до {T.mln(cheapest)}")
+            if profile["rooms"] and profile["rooms"] > 1:
+                chips.append(f"{profile['rooms'] - 1}-комнатные")
+            if profile.get("okrug"):
+                chips.append(f"Искать по всему городу ({profile['city']})")
+            question += " Что меняем?"
+        else:
+            # район, который назвал клиент (Черёмушки): догружаем страницы и оставляем только его, если хватает
+            named = profile.get("districts") or []
+            strict = False  # True — ищем только в названном районе
+            if named:
+                while sum(T.in_districts(x, named) for x in pool) < BATCH and page < 3:
+                    page += 1
+                    seen = {x["id"] for x in listings}
+                    extra = [x for x in await sources.more(profile, page) if x["id"] not in seen]
+                    listings += extra
+                    pool += [x for x in extra if T.passes_hard_filters(x, profile)]
+                inside = [x for x in pool if T.in_districts(x, named)]
+                s.prefs.districts_plus |= {x["district"] for x in inside}
+                if len(inside) >= 3:
+                    pool, strict = inside, True
+                    await s.say(f"Оставил только район {', '.join(named)}: {len(inside)} подходящих объявлений.")
+                else:
+                    await s.say(f"В районе {', '.join(named)} сейчас {len(inside)} подходящих объявлений — покажу их первыми, "
+                                "дальше соседние районы.")
+            if not (s.prefs.features or s.prefs.poi):
+                break
+            # пожелания (балкон, гардеробная, школа рядом…): показываем только то, что подтверждено
+            map_ok = await check_map(s, pool, announce=True)
+            good = [x for x in pool if fits(x, s.prefs, map_ok)]
+            while len(good) < BATCH and page < 3:
+                page += 1
+                seen = {x["id"] for x in listings}
+                extra = [x for x in await sources.more(profile, page) if x["id"] not in seen]
+                listings += extra
+                extra = [x for x in extra if T.passes_hard_filters(x, profile) and (not strict or T.in_districts(x, named))]
+                await check_map(s, extra)
+                pool += extra
+                good = [x for x in pool if fits(x, s.prefs, map_ok)]
+            want = wishes_text(s.prefs)
+            if good:
+                await s.say(f"Квартир {want}: {len(good)} из {len(pool)} подходящих по цене и району.")
+                pool = good
+                break
+            # ни одной: смотрим, есть ли такие дороже — и честно говорим
+            await s.emit("result", step=3, kind="search", data={"report": report, "total": len(listings), "matched": 0, "rows": []})
+            higher_budget = int(profile["budget_max"] * 1.3 // 100_000 * 100_000)
+            await s.say(f"В бюджете таких нет — проверяю квартиры до {T.fmt(higher_budget)}.")
+            richer = {**profile, "budget_max": higher_budget}
+            more_listings, _ = await sources.collect(richer)
+            above = [x for x in more_listings if T.passes_hard_filters(x, richer) and x["price"] > profile["budget_max"]
+                     and (not strict or T.in_districts(x, named))]
+            await check_map(s, above)
+            above = sorted((x for x in above if fits(x, s.prefs, map_ok)), key=lambda x: x["price"])
+            question = f"Квартир {want} до {T.fmt(profile['budget_max'])} не нашёл (проверил {len(pool)} подходящих по цене)."
+            chips = []
+            if above:
+                cheapest = above[0]["price"]
+                question += (f" Есть дороже: {len(above)} шт., самая доступная — {T.fmt(cheapest)}, "
+                             f"на {T.fmt(cheapest - profile['budget_max'])} больше бюджета.")
+                chips.append(f"Бюджет до {T.mln(int(-(-cheapest // 100_000) * 100_000))}")
+            else:
+                question += f" И до {T.fmt(higher_budget)} таких тоже нет."
+            if s.prefs.features or s.prefs.poi:
+                chips.append("Показать без этих условий")
+                if len(s.prefs.features) + len(s.prefs.poi) > 1:
+                    chips += [f"Без условия: {T.FEATURES[k][0]}" for k in s.prefs.features]
+                    chips += [f"Без условия: {geo.POI[k][0]}" for k in s.prefs.poi]
+            if profile.get("okrug"):
+                chips.append(f"Искать по всему городу ({profile['city']})")
+            question += " Что меняем?"
         r = await s.ask("clarify", "Ничего не нашлось", question, chips=chips)
         text = r["data"].get("text", "")
         if T.wants_whole_city(text):
             profile["okrug"] = None
+            profile["districts"] = []
+        dropped = drop_wishes(text, s.prefs)
         profile = await parse_request(s, text, base=profile)
+        # что клиент снял — не возвращаем, даже если модель снова увидела слово в ответе
+        profile["features"] = [k for k in profile.get("features") or [] if T.FEATURES[k][0] not in dropped]
+        profile["poi"] = [k for k in profile.get("poi") or [] if geo.POI[k][0] not in dropped]
+        s.prefs.features, s.prefs.poi = list(profile["features"]), list(profile["poi"])
         profile["summary"] = T.profile_summary(profile)
         await s.emit("result", step=1, kind="profile", data=profile)
     else:
@@ -336,8 +496,10 @@ async def pipeline(s: Session) -> None:
     order = ranked(pool, meta, s.prefs)
     rows = [{"id": x["id"], "address": x["address"], "district": x.get("district"), "area": x["area"],
              "price": x["price"], **meta[x["id"]]["fair"]} for x in order[:8]]
+    for r in report:  # с учётом страниц, догруженных ради района и пожеланий
+        r["count"] = sum(1 for x in listings if x.get("source_name") == r["source"])
     await s.emit("result", step=3, kind="search", data={"report": report, "total": len(listings), "matched": len(pool), "rows": rows})
-    src = ", ".join(f"{r['source']} — {r['count']}" + (" (сохранённый срез)" if r["status"] == "snapshot" else "") for r in report)
+    src =", ".join(f"{r['source']} — {r['count']}" + (" (сохранённый срез)" if r["status"] == "snapshot" else "") for r in report)
     over = sum(1 for x in pool if meta[x["id"]]["fair"]["overprice_pct"] > 1)
     await s.say(f"Нашёл объявлений: {src}. Под ваши параметры подходят {len(pool)}; "
                 f"{over} из них дороже справедливой цены — там есть что сторговать.")
@@ -347,19 +509,23 @@ async def pipeline(s: Session) -> None:
     await s.step(4, "active")
     by_id = {x["id"]: x for x in pool}
     shown: set[str] = set()
-    page = 1
     districts = sorted({x["district"] for x in pool if x.get("district")})
     for round_no in range(1, MAX_SELECTION_ROUNDS + 1):
+        before = (list(s.prefs.features), list(s.prefs.poi))
         for note in s.notes:
             await P.apply_text(s.prefs, note, s.llm, districts)
         s.notes.clear()
+        pool = await narrow_to_wishes(s, pool, before, map_ok)  # «а рядом должен быть парк» — уже в подборке
         order = ranked(pool, meta, s.prefs)
         liked = [x for x in order if x["id"] in s.prefs.liked]
         fresh = [x for x in order if x["id"] not in shown and x["id"] not in s.prefs.disliked and x["id"] not in s.prefs.liked
                  and x.get("district") not in s.prefs.districts_minus]
         if len(fresh) < BATCH and page < 3:
             page += 1
-            extra = [x for x in await sources.more(profile, page) if x["id"] not in by_id and T.passes_hard_filters(x, profile)]
+            extra = [x for x in await sources.more(profile, page) if x["id"] not in by_id and T.passes_hard_filters(x, profile)
+                     and (not strict or T.in_districts(x, named))]
+            await check_map(s, extra)
+            extra = [x for x in extra if fits(x, s.prefs, map_ok)]
             if extra:
                 pool += extra
                 comps += extra
@@ -371,7 +537,7 @@ async def pipeline(s: Session) -> None:
         batch = liked + fresh[:BATCH]
         shown |= {x["id"] for x in batch}
         await s.emit("result", step=4, kind="selection", data={
-            "round": round_no, "cards": [card(x, meta) for x in batch], "liked": s.prefs.liked,
+            "round": round_no, "cards": [card(x, meta, s.prefs) for x in batch], "liked": s.prefs.liked,
             "disliked": s.prefs.disliked, "learned": s.prefs.learned(), "remaining": len(fresh) - BATCH,
         })
         if round_no == 1:
@@ -382,7 +548,9 @@ async def pipeline(s: Session) -> None:
         s.prefs.liked = [i for i in d.get("liked", []) if i in by_id]
         s.prefs.disliked = [i for i in d.get("disliked", []) if i in by_id]
         if d.get("note"):
+            before = (list(s.prefs.features), list(s.prefs.poi))
             parsed = await P.apply_text(s.prefs, d["note"], s.llm, districts)
+            pool = await narrow_to_wishes(s, pool, before, map_ok)
             if parsed.get("budget_max"):
                 await s.say("Бюджет меняю только через «красные линии» — начните новый запрос, если он другой.")
         P.learn(s.prefs, by_id)
@@ -398,7 +566,7 @@ async def pipeline(s: Session) -> None:
     await s.step(5, "active")
     checks = {x["id"]: T.legal_check(x) for x in candidates}
     await s.emit("result", step=5, kind="legal", data={"checks": list(checks.values()),
-                                                         "listings": [card(x, meta) for x in candidates]})
+                                                         "listings": [card(x, meta, s.prefs) for x in candidates]})
     warned = [x for x in candidates if checks[x["id"]]["status"] == "warn"]
     await s.say(f"Проверил {len(candidates)} {T.plural(len(candidates), 'объект', 'объекта', 'объектов')} по данным объявлений"
                 + (f"; есть оговорки у {len(warned)} — покажу юристу." if warned else "; явных рисков не видно.")
@@ -410,7 +578,7 @@ async def pipeline(s: Session) -> None:
         fp = meta[listing["id"]]["fair"]
         authority = min(profile["budget_max"], listing["price"], fp["high"])
         seller = seller_sim.build(listing)
-        questions = T.missing_info(listing)
+        questions = call_questions(listing, s.prefs)
         slots = T.client_slots()
         await s.step(6, "active")
         r = await s.ask(
@@ -424,13 +592,15 @@ async def pipeline(s: Session) -> None:
         if not r["approved"]:
             await s.say("Пропускаю этот объект, перехожу к следующему.")
             continue
-        mode = "human" if r["data"].get("mode") == "human" else "auto"
+        mode = r["data"].get("mode") if r["data"].get("mode") in N.LIVE_MODES else "auto"
         neg = N.Negotiation(listing=listing, seller=seller, fair=fp, authority=authority, questions=questions,
                             slots=slots, mode=mode)
         s.journal = {"listing_id": listing["id"], "base_price": listing["price"], "fixed_at": date.today().isoformat(),
                      "url": listing.get("url")}
         end = None
-        human = (lambda: N.queue_input(s.seller_queue)) if mode == "human" else None
+        while not s.seller_queue.empty():  # реплики от прошлого звонка не нужны
+            s.seller_queue.get_nowait()
+        human = (lambda: N.queue_input(s.seller_queue)) if neg.live else None
         async for ev in N.run(s.llm, neg, human_input=human):
             await s.events.put(ev)
             if ev["type"] == "call_end":
@@ -461,7 +631,7 @@ async def pipeline(s: Session) -> None:
         await s.step(7, "active")
         slot = end.get("viewing") or slots[0]
         await s.emit("result", step=7, kind="viewing", data={
-            "listing": card(listing, meta), "slot": slot, "slots": slots, "learned": end["learned"],
+            "listing": card(listing, meta, s.prefs), "slot": slot, "slots": slots, "learned": end["learned"],
             "checklist": T.viewing_checklist(listing),
         })
         await s.say(f"Просмотр: {slot}. Подготовил чек-лист осмотра с учётом того, что узнал у продавца.")

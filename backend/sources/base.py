@@ -4,7 +4,7 @@
 оно пришло. Поля: id, source, source_name, url, city, district, okrug, address,
 rooms, area, kitchen, floor, floors, year, condition, material, price,
 days_on_market, metro, photo, description, rosreestr_checked, is_apartments,
-is_auction, seller_role, lat, lng. Неизвестные поля — None:
+is_auction, seller_role, balconies (балконы и лоджии вместе), loggias, separate_wc, lat, lng. Неизвестные поля — None:
 именно их агент уточняет у продавца по телефону.
 """
 from __future__ import annotations

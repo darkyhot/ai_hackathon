@@ -4,7 +4,10 @@ import { addGuard, addLine, createCall, renderCall, setPhase, setStatus, setTypi
 import { savingsChart } from "./chart.js";
 import { mountEconomics } from "./economics.js";
 import { el, html, rub, sleep } from "./format.js";
+import { mountMap } from "./map.js";
+import { PhoneCall, formatPhone, normalizePhone } from "./phone.js";
 import * as V from "./views.js";
+import { Talk } from "./talk.js";
 import { bindMic, recorder, voice } from "./voice.js";
 
 const STEPS = ["Запрос", "Финансы", "Поиск", "Подбор", "Проверка", "Звонок", "Просмотр", "Сделка", "Итог"];
@@ -19,11 +22,14 @@ let gen = 0; // поколение сессии: события старой с�
 let queue = [];
 let pumping = false;
 let cities = [];
+let phoneReady = false; // в .env есть ключ Exolve — можно звонить на настоящий телефон
+let sellerPhoneDefault = ""; // SELLER_PHONE из .env
+const HANGUP = "(положил трубку)"; // сервер понимает это как конец разговора
 
 function freshState() {
   return {
     sid: null, es: null, running: false, streamEnded: false, results: {}, status: Array(10).fill("idle"), view: 0,
-    call: null, marks: { liked: new Set(), disliked: new Set() }, opened: {}, strategy: null, awaiting: null,
+    call: null, phone: null, marks: { liked: new Set(), disliked: new Set() }, opened: {}, strategy: null, awaiting: null,
   };
 }
 
@@ -91,6 +97,7 @@ function confirmCard(ev) {
   if (ev.kind === "clarify") {
     state.awaiting = "clarify";
     const chips = ev.chips || [];
+    sayPrompt(chips.length ? `${ev.text} Например: ${chips.slice(0, 3).join(", или ")}.` : ev.text);
     extra.innerHTML = html`<p class="hint">Ответьте в поле ниже — текстом или голосом.</p>
       ${html.raw(chips.length ? html`<div class="quick">${html.raw(chips.map((c) => html`<button class="chip-btn" data-quick="${c}">${c}</button>`).join(""))}</div>` : "")}`;
     extra.querySelectorAll("[data-quick]").forEach((b) => b.addEventListener("click", () => sendText(b.dataset.quick)));
@@ -118,21 +125,45 @@ function confirmCard(ev) {
     extra.innerHTML = financeForm(ev);
     collect = () => collectForm(card);
   }
+  if (ev.kind === "call" && phoneReady) {
+    // регистрируемся в Exolve заранее: по клику звонок уходит сразу
+    if (!state.phone || state.phone.ended) state.phone = new PhoneCall();
+    state.phone.connect().catch((e) => console.warn("Exolve:", e.message));
+    extra.innerHTML = html`<label class="phone-field">Ваш телефон — агент позвонит вам как продавцу
+      <input type="tel" inputmode="tel" placeholder="+7 999 123-45-67" value="${storedPhone()}" data-phone autocomplete="tel"></label>`;
+  }
 
   const buttons = {
     red_lines: [["Подтвердить рамки", true, {}], ["Изменить запрос", false, {}]],
-    finance: ev.price ? [["Рассчитать стратегию", true, {}], ["Пропустить", false, {}]] : [["Посчитать бюджет", true, {}], ["Взять пример", false, {}]],
+    finance: ev.price ? [["Рассчитать стратегию", true, {}], ["Пропустить", false, {}]] : [["Посчитать бюджет", true, {}]],
     payment: [["Наличными — вся сумма есть", true, { payment: "cash" }], ["Ипотека, на взнос хватает", true, { payment: "mortgage_ready" }], ["Ипотека, взнос ещё копим", true, { payment: "mortgage_saving" }]],
     finance_choice: ev.gap ? [["Перейти к поиску квартиры", true, {}], ["Сначала накопить", false, {}]] : [["Перейти к поиску квартиры", true, {}]],
-    call: [["Звонить — продавца играет ИИ", true, { mode: "auto" }], ["Звонить — продавец я", true, { mode: "human" }], ["Пропустить объект", false, {}]],
+    call: [
+      ...(phoneReady ? [["Позвонить мне на телефон", true, { mode: "phone" }]] : []),
+      ["Звонить — продавца играет ИИ", true, { mode: "auto" }], ["Звонить — продавец я (в чате)", true, { mode: "human" }], ["Пропустить объект", false, {}],
+    ],
     price: [[`Подтвердить ${rub(ev.price)}`, true, {}], ["Отклонить, звонить дальше", false, {}]],
     object: [["Выбираю эту квартиру", true, {}], ["Ищем дальше", false, {}]],
     sign: [["Подписать электронно", true, {}], ["Отложить", false, {}]],
   }[ev.kind] || [["Подтвердить", true, {}], ["Отклонить", false, {}]];
 
+  // голосом: что сказать вслух и как ответить
+  const hint = voiceHint(ev);
+  card.dataset.hint = hint;
+  const spoken = {
+    red_lines: () => `Проверим рамки: ${ev.payload.city}, ${ev.payload.rooms === 0 ? "студия" : `${ev.payload.rooms}-комнатная`}, бюджет до ${rub(ev.payload.budget_max)}. ${ev.text}`,
+    finance: () => `${ev.title}.`,
+    payment: () => `${ev.title}`,
+  }[ev.kind]?.() ?? `${ev.title}. ${ev.text}`;
+  sayPrompt(`${spoken} ${hint}`);
+
   buttons.forEach(([label, approved, data], i) => {
     const b = el(html`<button class="btn ${i === 0 ? "btn-primary" : "btn-ghost"} btn-small">${label}</button>`);
-    b.addEventListener("click", () => decide(card, ev.kind, approved, { ...collect(), ...data }, label));
+    b.addEventListener("click", () => {
+      if (data.mode === "phone") return dialSeller(card, label);
+      if (ev.kind === "call" && state.phone) { state.phone.hangup(); state.phone = null; } // заготовленный звонок не нужен
+      return decide(card, ev.kind, approved, { ...collect(), ...data }, label);
+    });
     actions.append(b);
   });
   chatLog.append(card);
@@ -140,6 +171,166 @@ function confirmCard(ev) {
   actions.querySelector("button")?.focus({ preventScroll: true });
   if (matchMedia("(max-width: 860px)").matches) card.scrollIntoView({ block: "center", behavior: "smooth" });
 }
+
+// ------------------------------------------------------------------ голосовой режим
+
+const talk = new Talk({
+  onText: (text) => routeVoice(text),
+  canListen: () => {
+    if (state.phone?.session && !state.phone.ended) return false; // идёт звонок на телефон
+    const c = state.call;
+    if (c?.started && !c.ended) return c.mode === "human" && c.awaitingSeller; // в звонке слушаем только «продавца»
+    return true;
+  },
+  onState: (st, detail) => renderTalk(st, detail),
+  onLevel: (rms) => $("talkOrb").style.setProperty("--lvl", Math.min(1, rms * 14).toFixed(2)),
+});
+
+const phoneActive = () => Boolean(state.phone?.session && !state.phone.ended);
+
+function sayPrompt(text) {
+  state.lastPrompt = text;
+  if (talk.on && !phoneActive()) talk.say(text);
+}
+
+function voiceHint(ev) {
+  return {
+    red_lines: "Скажите «да», если всё верно, или «изменить».",
+    finance: ev.price ? "Скажите «посчитай» или «пропустить»." : "Скажите «посчитай» — цифры можно поправить на карточке.",
+    payment: "Скажите: наличными, ипотека и взнос есть — или копим на взнос.",
+    finance_choice: ev.gap ? "Скажите «к поиску» или «сначала накопить»." : "Скажите «к поиску».",
+    call: phoneReady
+      ? "Скажите: «позвони мне», «продавца сыграет ИИ», «продавец я» или «пропустить»."
+      : "Скажите: «продавца сыграет ИИ», «продавец я» или «пропустить».",
+    price: "Подтверждаете? Скажите «да» или «отклонить».",
+    object: "Скажите «беру» или «ищем дальше».",
+    sign: "Скажите «подписать» или «отложить».",
+  }[ev.kind] || "Скажите «да» или «нет».";
+}
+
+const norm = (t) => t.toLowerCase().replace(/ё/g, "е").replace(/[.,!?…«»"]/g, " ").replace(/\s+/g, " ").trim();
+const YES = /^(да|ага|угу|давай|хорошо|ладно|ок|окей|конечно|верно|все верно|поехали|подтвер|согласен|согласна|годится|подходит)/;
+const NO = /^(нет|не надо|не нужно|не хочу|отмена|отмени)/;
+
+// какую кнопку карточки нажать по фразе: [образец, часть надписи кнопки или её номер]
+const VOICE_PICK = {
+  red_lines: [[/измен|друг/, "Изменить"], [/подтвер/, "Подтвердить"], [NO, "Изменить"], [YES, "Подтвердить"]],
+  finance: [[/пропус/, "Пропустить"], [NO, "Пропустить"], [/посчит|рассчит|бюджет|стратег/, 0], [YES, 0]],
+  payment: [[/налич|вся сумма|целиком|сразу/, "Наличными"], [/коп|не хватает|нет взноса|накоп/, "копим"], [/ипотек|хватает|взнос есть|есть взнос/, "хватает"]],
+  finance_choice: [[/накоп|коп/, "Сначала накопить"], [/поиск|ищ|квартир|дальше/, "Перейти"], [YES, "Перейти"]],
+  call: [
+    [/пропус|не звони|друг(ой|ую|ая)/, "Пропустить"],
+    [/продавец (я|буду)|я продавец|я сыграю|я сам|сам буду|в чате/, "продавец я"],
+    [/(^|\s)ии(\s|$)|нейросет|искусствен|робот|сыгра|играет|автомат/, "играет ИИ"],
+    [/телефон|позвони мне|мне позвони|на мой|набери/, "Позвонить мне"],
+    [YES, 0],
+  ],
+  price: [[/не подтвер|отклон|дорого|дальше|^нет/, "Отклонить"], [/подтвер|беру|соглас/, "Подтвердить"], [YES, "Подтвердить"]],
+  object: [[/дальше|не (беру|нрав|подход)|^нет/, "Ищем дальше"], [/беру|выбира|эту/, "Выбираю"], [YES, "Выбираю"]],
+  sign: [[/отлож|позже|потом|^нет/, "Отложить"], [/подпис/, "Подписать"], [YES, "Подписать"]],
+};
+
+function voiceButton(card, t) {
+  const kind = [...card.classList].find((c) => c.startsWith("confirm-"))?.slice(8);
+  const buttons = [...card.querySelectorAll(".actions button:not(:disabled)")];
+  const rules = VOICE_PICK[kind] || [[NO, 1], [YES, 0]];
+  for (const [re, target] of rules) {
+    if (!re.test(t)) continue;
+    const b = typeof target === "number" ? buttons[target] : buttons.find((x) => x.textContent.includes(target));
+    if (b) return b;
+  }
+  return null;
+}
+
+const ORDINALS = [["перв", 1], ["втор", 2], ["трет", 3], ["четв", 4], ["пят", 5], ["шест", 6], ["седьм", 7], ["восьм", 8], ["девят", 9], ["десят", 10]];
+
+// «вторая нравится», «первая и третья не то» -> отметки в подборке
+function voteByVoice(t) {
+  const cards = state.results[4]?.cards || [];
+  const down = /не то|не нрав|не подход|не хоч|убер|минус|плох|мимо/.test(t);
+  const up = !down && /нрав|подход|отлич|хорош|лайк|плюс|беру|отмет|интерес|супер|класс/.test(t);
+  if (!up && !down) return false;
+  const nums = new Set();
+  for (const [stem, n] of ORDINALS) if (new RegExp(`(^|\\s)${stem}\\w*`).test(t)) nums.add(n);
+  for (const m of t.matchAll(/(?:номер|№)\s*(\d+)/g)) nums.add(Number(m[1]));
+  const ids = [...nums].map((n) => cards[n - 1]?.id).filter(Boolean);
+  ids.forEach((id) => setVote(id, up ? "up" : "down", false));
+  if (ids.length) talk.say(up ? "Отметил." : "Убрал.");
+  return ids.length > 0;
+}
+
+async function routeVoice(text) {
+  const t = norm(text);
+  if (/^(стоп|хватит|выключи (голос|микрофон)|заверши(ть)? разговор)/.test(t)) return stopTalk();
+  const c = state.call;
+  if (c?.started && !c.ended && c.mode === "human" && c.awaitingSeller) {
+    c.awaitingSeller = false;
+    c.root?.querySelector("[data-seller-slot]")?.replaceChildren();
+    return submitSeller(text);
+  }
+  const card = [...chatLog.querySelectorAll(".confirm:not(.is-done):not(.confirm-clarify)")].pop();
+  if (card && card.querySelector(".actions button:not(:disabled)")) {
+    const b = voiceButton(card, t);
+    if (!b) return talk.say(`Не понял. ${card.dataset.hint || ""}`);
+    addMsg("user", text);
+    b.click();
+    return;
+  }
+  if (state.awaiting === "selection") {
+    if (voteByVoice(t)) return addMsg("user", text);
+    if (/звони|позвони|созвон|продавц|поехали/.test(t)) {
+      addMsg("user", text);
+      return selectionAction("proceed", true);
+    }
+  }
+  return sendText(text);
+}
+
+const TALK_TEXT = {
+  listening: ["Слушаю", "Говорите — отвечу, когда замолчите"],
+  hearing: ["Слышу вас…", "Договорите — я подожду паузу"],
+  processing: ["Распознаю…", ""],
+  thinking: ["Агент думает…", "Ответит через пару секунд"],
+  speaking: ["Агент говорит", "Нажмите на кружок, чтобы перебить"],
+  waiting: ["Идёт звонок", "Продолжим, когда звонок закончится"],
+};
+
+function renderTalk(st, detail = "") {
+  const panel = $("talkPanel");
+  panel.dataset.state = st;
+  const [title, sub] = TALK_TEXT[st] || ["", ""];
+  $("talkState").textContent = title;
+  $("talkHint").textContent = detail || (st === "listening" && state.running ? "Можно ответить или добавить пожелание" : sub);
+  if (st !== "listening" && st !== "hearing") $("talkOrb").style.setProperty("--lvl", "0");
+}
+
+async function startTalk() {
+  voice.stop();
+  try {
+    await talk.start();
+  } catch (e) {
+    addMsg("error", e.message);
+    return;
+  }
+  $("composer").hidden = true;
+  $("talkPanel").hidden = false;
+  $("talkBtn").setAttribute("aria-pressed", "true");
+  const card = [...chatLog.querySelectorAll(".confirm:not(.is-done)")].pop();
+  if (card && state.lastPrompt) talk.say(state.lastPrompt);
+  else if (state.awaiting === "selection") talk.say(SELECTION_PROMPT);
+  else if (!state.running) talk.say("Слушаю. Расскажите, какую квартиру ищете: город, бюджет, комнаты и что для вас важно.");
+  else talk.say("Слушаю.");
+}
+
+function stopTalk() {
+  talk.stop();
+  $("composer").hidden = false;
+  $("talkPanel").hidden = true;
+  $("talkBtn").setAttribute("aria-pressed", "false");
+}
+
+const SELECTION_PROMPT = "Подборка на экране. Скажите, что нравится — например, «вторая нравится» или «третья не то», "
+  + "— или добавьте пожелание. Когда будете готовы, скажите «звони».";
 
 // ------------------------------------------------------------------ степпер и сцена
 
@@ -176,6 +367,8 @@ function renderStage() {
     stage.innerHTML = viewFor(state.view);
     const chart = stage.querySelector("[data-chart]");
     if (chart && state.results[2]?.finance) savingsChart(chart, state.results[2].finance, chart.dataset.selected);
+    const map = stage.querySelector("[data-map]");
+    if (map && state.results[4]?.cards) mountMap(map, state.results[4].cards);
   }
   renderStepper();
 }
@@ -187,13 +380,84 @@ function show(n) {
   } else renderStepper();
 }
 
+// ------------------------------------------------------------------ настоящий звонок (МТС Exolve)
+
+function storedPhone() {
+  try { return localStorage.getItem("sellerPhone") || sellerPhoneDefault; } catch { return sellerPhoneDefault; }
+}
+
+async function dialSeller(card, label) {
+  const input = card.querySelector("[data-phone]");
+  const number = normalizePhone(input?.value);
+  card.querySelector(".mic-error")?.remove();
+  const note = (text, isError = false) => {
+    card.querySelector(".dial-note")?.remove();
+    card.querySelector(".actions").before(el(html`<p class="dial-note ${isError ? "mic-error" : ""}">${text}</p>`));
+  };
+  if (!number) { note("Введите российский номер: +7 и 10 цифр.", true); input?.focus(); return; }
+  try { localStorage.setItem("sellerPhone", input.value.trim()); } catch { /* приватный режим */ }
+  const buttons = card.querySelectorAll("button, input");
+  buttons.forEach((x) => (x.disabled = true));
+  voice.stop();
+  const phone = state.phone && !state.phone.ended ? state.phone : new PhoneCall();
+  state.phone = phone;
+  const steps = {
+    connecting: "Подключаюсь к МТС Exolve…",
+    dialing: `Звоню на ${formatPhone(number)}…`,
+    ringing: `Звоню на ${formatPhone(number)} — возьмите трубку. Вы — продавец квартиры.`,
+    answered: "Трубку взяли — агент начинает разговор.",
+  };
+  try {
+    await phone.dial(number, (st) => note(steps[st] || st));
+  } catch (e) {
+    if (state.phone === phone) state.phone = null;
+    buttons.forEach((x) => (x.disabled = false));
+    note(e.message, true);
+    return;
+  }
+  // продавец положил трубку: ближайшее ожидание ответа (listenPhone) сообщит агенту
+  phone.onEnded = () => {
+    if (state.phone === phone && state.call && !state.call.ended) addMsg("note", "Продавец положил трубку.");
+  };
+  await decide(card, "call", true, { mode: "phone" }, `${label}: ${formatPhone(number)}`);
+}
+
+async function speakPhone(text) {
+  try {
+    await state.phone.say(text);
+  } catch (e) {
+    addMsg("error", `Агент не смог произнести фразу: ${e.message}`);
+  }
+}
+
+async function listenPhone(call, myGen) {
+  const phone = state.phone;
+  if (!phone || phone.ended) return submitSeller(HANGUP);
+  const r = await phone.listen((st) => {
+    if (gen !== myGen) return;
+    setTyping(call, st === "listening" ? "seller" : "agent");
+    setStatus(call, st === "listening" ? "Идёт звонок · слушаю продавца" : "Идёт звонок · распознаю ответ");
+  });
+  if (gen !== myGen || call.ended) return;
+  setStatus(call, "Идёт звонок · запись");
+  if (r.text) return submitSeller(r.text);
+  if (r.ended) return submitSeller(HANGUP);
+  // не распознали — даём ответить текстом, разговор не теряется
+  addMsg("error", `${r.error} Впишите ответ продавца вручную.`);
+  showSellerInput(call, submitSeller);
+}
+
 // ------------------------------------------------------------------ события агента
 
 async function handle(ev, myGen) {
   const call = state.call;
   switch (ev.type) {
     case "provider": setProvider(ev); break;
-    case "message": addMsg(ev.role, ev.text); await sleep(ev.role === "agent" ? 300 : 0); break;
+    case "message":
+      addMsg(ev.role, ev.text);
+      if (ev.role === "agent" && talk.on && !phoneActive()) talk.say(ev.text);
+      await sleep(ev.role === "agent" ? 300 : 0);
+      break;
     case "step":
       state.status[ev.step] = ev.status === "pending" ? "active" : ev.status;
       if (ev.status === "active") show(ev.step); else renderStepper();
@@ -213,6 +477,7 @@ async function handle(ev, myGen) {
         renderStage();
       }
       if (ev.kind !== "clarify") state.awaiting = ev.kind === "selection" ? "selection" : null;
+      if (ev.kind === "selection") sayPrompt(SELECTION_PROMPT);
       confirmCard(ev);
       break;
     case "product_opened":
@@ -236,9 +501,15 @@ async function handle(ev, myGen) {
       updatePrices(call);
       node?.classList.add("is-speaking");
       const t0 = performance.now();
-      await voice.speak(ev.text, ev.speaker);
-      if (!voice.enabled) await sleep(Math.min(3000, 800 + ev.text.length * 16));
-      else await sleep(Math.max(0, 300 - (performance.now() - t0)));
+      if (call.mode === "phone") {
+        if (ev.speaker === "agent" && state.phone && !state.phone.ended) await speakPhone(ev.text);
+        else await sleep(300);
+      } else {
+        // в голосовом режиме звонок звучит всегда
+        await voice.speak(ev.text, ev.speaker, talk.on);
+        if (!voice.enabled && !talk.on) await sleep(Math.min(3000, 800 + ev.text.length * 16));
+        else await sleep(Math.max(0, 300 - (performance.now() - t0)));
+      }
       node?.classList.remove("is-speaking");
       if (gen !== myGen) return;
       if (!call.ended && !call.awaitingSeller) setTyping(call, ev.speaker === "agent" ? (call.mode === "human" ? null : "seller") : "agent");
@@ -251,7 +522,11 @@ async function handle(ev, myGen) {
       updatePrices(call);
       break;
     case "guard": if (call) addGuard(call, ev.text); break;
-    case "await_seller": if (call) showSellerInput(call, submitSeller); break;
+    case "await_seller":
+      if (!call) break;
+      if (call.mode === "phone") await listenPhone(call, myGen);
+      else showSellerInput(call, submitSeller);
+      break;
     case "call_end":
       if (!call) break;
       call.ended = true;
@@ -259,9 +534,14 @@ async function handle(ev, myGen) {
       setTyping(call, null);
       setStatus(call, ev.status === "agreed" ? "Звонок завершён · договорились" : "Звонок завершён · ждём вашего решения", true);
       showLearned(call, ev.learned, ev.viewing);
+      if (state.phone) { state.phone.hangup(); state.phone = null; }
       break;
     case "done": finish(ev.status); break;
-    case "error": addMsg("error", ev.text); finish("error"); break;
+    case "error":
+      addMsg("error", ev.text);
+      if (talk.on) talk.say(`Ошибка: ${ev.text}`);
+      finish("error");
+      break;
   }
 }
 
@@ -311,6 +591,7 @@ function setComposer() {
 async function start(query) {
   if (!query.trim()) return;
   state.es?.close();
+  state.phone?.hangup();
   voice.stop();
   gen += 1;
   queue = [];
@@ -361,9 +642,12 @@ async function sendText(text) {
   }
 }
 
-async function selectionAction(action) {
+async function selectionAction(action, byVoice = false) {
   if (state.awaiting !== "selection") return;
-  if (action === "proceed" && !state.marks.liked.size && !confirm("Вы ничего не отметили. Позвонить по трём лучшим вариантам?")) return;
+  if (action === "proceed" && !state.marks.liked.size) {
+    if (byVoice) talk.say("Вы ничего не отметили — позвоню по трём лучшим вариантам.");
+    else if (!confirm("Вы ничего не отметили. Позвонить по трём лучшим вариантам?")) return;
+  }
   state.awaiting = null;
   stage.querySelectorAll("[data-selection]").forEach((b) => (b.disabled = true));
   try {
@@ -398,6 +682,7 @@ $("query").addEventListener("keydown", (e) => {
 });
 $("resetBtn").addEventListener("click", () => {
   state.es?.close();
+  state.phone?.hangup();
   voice.stop();
   gen += 1;
   queue = [];
@@ -419,22 +704,7 @@ stage.addEventListener("click", async (e) => {
   if (ex) return start(ex.dataset.example);
 
   const vote = e.target.closest("[data-vote]");
-  if (vote) {
-    const id = vote.closest("[data-id]").dataset.id;
-    const { liked, disliked } = state.marks;
-    const up = vote.dataset.vote === "up";
-    const set = up ? liked : disliked;
-    const other = up ? disliked : liked;
-    if (set.has(id)) set.delete(id); else { set.add(id); other.delete(id); }
-    const card = vote.closest(".offer");
-    card.classList.toggle("is-liked", liked.has(id));
-    card.classList.toggle("is-disliked", disliked.has(id));
-    card.querySelector('[data-vote="up"]').setAttribute("aria-pressed", String(liked.has(id)));
-    card.querySelector('[data-vote="down"]').setAttribute("aria-pressed", String(disliked.has(id)));
-    const counter = stage.querySelector("[data-liked-count]");
-    if (counter) counter.textContent = `(${liked.size})`;
-    return;
-  }
+  if (vote) return setVote(vote.closest("[data-id]").dataset.id, vote.dataset.vote, true);
   const sel = e.target.closest("[data-selection]");
   if (sel) return selectionAction(sel.dataset.selection);
 
@@ -450,6 +720,31 @@ stage.addEventListener("click", async (e) => {
     catch (err) { open.disabled = false; addMsg("error", `Не удалось: ${err.message}`); }
   }
 });
+/** Отметка «нравится / не то». toggle — повторное нажатие снимает отметку (клик); голосом — просто ставим. */
+function setVote(id, dir, toggle) {
+  const { liked, disliked } = state.marks;
+  const up = dir === "up";
+  const set = up ? liked : disliked;
+  const other = up ? disliked : liked;
+  if (toggle && set.has(id)) set.delete(id); else { set.add(id); other.delete(id); }
+  const card = stage.querySelector(`.offer[data-id="${CSS.escape(id)}"]`);
+  if (card) {
+    card.classList.toggle("is-liked", liked.has(id));
+    card.classList.toggle("is-disliked", disliked.has(id));
+    card.querySelector('[data-vote="up"]')?.setAttribute("aria-pressed", String(liked.has(id)));
+    card.querySelector('[data-vote="down"]')?.setAttribute("aria-pressed", String(disliked.has(id)));
+  }
+  const counter = stage.querySelector("[data-liked-count]");
+  if (counter) counter.textContent = `(${liked.size})`;
+}
+
+$("talkBtn").addEventListener("click", () => (talk.on ? stopTalk() : startTalk()));
+$("talkEnd").addEventListener("click", stopTalk);
+$("talkOrb").addEventListener("click", () => {
+  if (talk.busy) talk.interrupt();
+  else talk.capture?.stop(); // договорил — отправить сразу, не дожидаясь паузы
+});
+
 stepper.addEventListener("click", (e) => {
   const b = e.target.closest("button[data-step]");
   if (b && !b.disabled) show(Number(b.dataset.step));
@@ -480,6 +775,8 @@ renderStage();
 api.health().then((h) => {
   cities = h.cities || [];
   recorder.available = Boolean(h.stt?.installed && h.stt.status !== "error");
+  phoneReady = Boolean(h.phone?.configured);
+  sellerPhoneDefault = h.phone?.seller_phone || "";
   setProvider(h);
   if (state.view === 0) renderStage();
 })

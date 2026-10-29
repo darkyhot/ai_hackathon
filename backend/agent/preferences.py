@@ -10,8 +10,9 @@ import re
 import statistics
 from dataclasses import dataclass, field
 
+from .. import geo
 from ..llm import LLMClient, LLMError
-from .tools import fmt
+from .tools import FEATURES, feature_status, fmt, merge_features, wanted_features
 
 
 @dataclass
@@ -27,10 +28,16 @@ class Prefs:
     conditions_plus: set[str] = field(default_factory=set)
     metro_max: int | None = None
     price_focus: int | None = None
+    features: list[str] = field(default_factory=list)  # удобства, о которых просил клиент (tools.FEATURES)
+    poi: list[str] = field(default_factory=list)       # что должно быть рядом с домом (geo.POI)
     notes: list[str] = field(default_factory=list)
 
     def learned(self) -> list[str]:
         out = []
+        if self.features:
+            out.append("важно: " + ", ".join(FEATURES[k][0] for k in self.features))
+        if self.poi:
+            out.append("рядом: " + ", ".join(geo.POI[k][0] for k in self.poi))
         if self.districts_plus:
             out.append("нравятся районы: " + ", ".join(sorted(self.districts_plus)))
         if self.districts_minus:
@@ -105,6 +112,10 @@ def adjust(x: dict, p: Prefs) -> float:
         s -= 6
     if x.get("condition") in p.conditions_plus:
         s += 5
+    for key in p.features:
+        status = feature_status(x, key)
+        s += 12 if status else -8 if status is False else 0
+    s += geo.score(x, p.poi)
     m = (x.get("metro") or {}).get("minutes")
     if p.metro_max and m is not None and m > p.metro_max:
         s -= 8
@@ -124,6 +135,8 @@ PARSE_FEEDBACK = """Клиент подбирает квартиру и пише
 async def apply_text(p: Prefs, text: str, llm: LLMClient, districts: list[str]) -> dict:
     """Разбирает пожелание текстом. Возвращает распознанные поля (budget_max — для профиля)."""
     p.notes.append(text)
+    p.features[:] = merge_features(p.features, wanted_features(text))
+    p.poi += [k for k in geo.wanted(text) if k not in p.poi]
     try:
         d = await llm.chat_json(
             [{"role": "system", "content": PARSE_FEEDBACK.replace("{districts}", ", ".join(districts) or "—")},

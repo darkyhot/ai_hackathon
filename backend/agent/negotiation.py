@@ -6,7 +6,8 @@
 - итоговая цена — только «согласована предварительно», финал подтверждает клиент.
 
 Если LLM недоступен или ответил мусором, ход делает сценарная стратегия.
-Продавцом может быть ИИ (mode="auto") или человек (mode="human").
+Продавцом может быть ИИ (mode="auto") или человек: в браузере (mode="human")
+или на настоящем телефоне через МТС Exolve (mode="phone").
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from typing import AsyncIterator, Awaitable, Callable
 
 from ..llm import LLMClient, LLMError
 from . import prompts
-from .tools import bargaining_arguments, fmt, parse_money
+from .tools import bargaining_arguments, fmt, parse_money, parse_price_near
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ log = logging.getLogger(__name__)
 LLM_FAIL = (LLMError, KeyError, IndexError, TypeError, ValueError)
 
 MAX_ROUNDS = 6
+LIVE_MODES = {"human", "phone"}  # продавец отвечает сам: в браузере или по телефону
+HANGUP = "(положил трубку)"  # так браузер сообщает, что продавец завершил звонок
 STEP = 10_000
 AGREE_WORDS = ("соглас", "договорились", "по рукам", "давайте так", "хорошо, давайте", "идёт", "идет", "устраивает")
 
@@ -53,6 +56,11 @@ class Negotiation:
     agreed_price: int | None = None
     used_fallback: bool = False
     viewing: str | None = None
+
+    @property
+    def live(self) -> bool:
+        """Продавец — человек: в браузере (human) или по телефону (phone)."""
+        return self.mode in LIVE_MODES
 
     def __post_init__(self):
         self.asking = self.listing["price"]
@@ -181,7 +189,20 @@ async def llm_seller(llm: LLMClient, n: Negotiation, phase: str) -> dict:
             "accept": bool(data.get("accept"))}
 
 
+def _agrees(text: str) -> bool:
+    t = text.lower()
+    return any(w in t for w in AGREE_WORDS) and not re.search(r"\bне\s+(?:со)?глас|\bне\s+устраива", t)
+
+
 async def parse_human_seller(llm: LLMClient, n: Negotiation, text: str) -> dict:
+    """Ответ продавца -> {ask, accept}. Назвал цену выше нашего предложения — это встречная цена,
+    а не согласие, даже со словами «давай» или «хорошо»."""
+    # быстрый путь без модели: в ответе есть правдоподобная цена или явное «согласен» — экономим секунды в звонке
+    ask = parse_price_near(text, n.listing["price"])
+    if ask:
+        return {"utterance": text, "ask": ask, "accept": n.offer is not None and ask <= n.offer}
+    if _agrees(text) and not re.search(r"\d", text):
+        return {"utterance": text, "ask": None, "accept": True}
     try:
         data = await llm.chat_json(
             [{"role": "system", "content": prompts.PARSE_SELLER.replace("{offer}", str(n.offer)).replace("{ask}", str(n.asking))},
@@ -191,10 +212,9 @@ async def parse_human_seller(llm: LLMClient, n: Negotiation, text: str) -> dict:
         ask = normalize_price(data.get("ask"))
         accept = bool(data.get("accept"))
     except LLM_FAIL:
-        ask, accept = parse_money(text), any(w in text.lower() for w in AGREE_WORDS)
-    if ask is None:
-        bare = re.search(r"\b(\d{1,2}[.,]\d{1,3})\b", text)  # «8,7» без «млн»
-        ask = normalize_price(bare.group(1)) if bare else None
+        ask, accept = None, _agrees(text)
+    if ask is not None and n.offer is not None and ask > n.offer:
+        accept = False  # встречная цена, а не согласие
     return {"utterance": text, "ask": ask, "accept": accept}
 
 
@@ -275,6 +295,14 @@ def guard_buyer(n: Negotiation, move: dict, phase: str, first: bool) -> list[str
         notes.append(f"Цена продавца {fmt(n.asking)} выше лимита клиента — агент не может согласиться")
         move["accept"] = False
         move["offer"] = n.authority
+    # сказанная вслух цена должна совпадать с той, что агент на самом деле принимает или предлагает
+    said = parse_price_near(move["utterance"], n.listing["price"])
+    if move["accept"] and said and said != n.asking:
+        notes.append(f"Агент назвал {fmt(said)}, но принимает цену продавца {fmt(n.asking)} — реплика исправлена")
+        move["utterance"] = f"Хорошо, {fmt(n.asking)} — договорились. Подтвержу у клиента и пришлю итоги письменно."
+    elif not move["accept"] and move["offer"] and said and said > move["offer"]:
+        notes.append(f"Агент назвал {fmt(said)} — выше своего предложения {fmt(move['offer'])}, реплика исправлена")
+        move["utterance"] = f"Клиент готов на {fmt(move['offer'])}. Сделка быстрая, через безопасные расчёты Сбера. Что скажете?"
     return notes
 
 
@@ -325,15 +353,16 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
         return move, notes
 
     async def seller_turn(round_no: int, phase: str):
-        if n.mode == "human" and human_input is not None:
+        if n.live and human_input is not None:
             text = await human_input()
-            if text is None:
+            if text is None or text == HANGUP:
                 return None
             if phase == "bargain":
                 smove = await parse_human_seller(llm, n, text)
-                smove["ask"] = r10k(min(smove["ask"], n.asking)) if smove["ask"] else n.asking
-                if smove["accept"] and n.offer is not None:
-                    smove["ask"] = n.offer
+                said = smove["ask"]
+                smove["ask"] = r10k(min(said, n.asking)) if said else n.asking
+                if smove["accept"] and n.offer is not None and (said is None or said <= n.offer):
+                    smove["ask"] = n.offer  # «согласен» без своей цены — на наше предложение
             else:
                 smove = {"utterance": text, "ask": n.asking, "accept": False}
         else:
@@ -362,7 +391,7 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
     for note in notes:
         yield {"type": "guard", "text": note}
     yield {"type": "turn", "speaker": "agent", "text": move["utterance"], "offer": None, "phase": "clarify"}
-    if n.mode == "human":
+    if n.live:
         yield {"type": "await_seller"}
     smove = await seller_turn(0, "clarify")
     if smove is None:
@@ -385,7 +414,7 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
                 break
             if round_no == MAX_ROUNDS:
                 break
-            if n.mode == "human":
+            if n.live:
                 yield {"type": "await_seller"}
             prev_ask = n.asking
             smove = await seller_turn(round_no, "bargain")
@@ -415,7 +444,7 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
         yield {"type": "call_phase", "phase": "viewing"}
         move, notes = await agent_turn(MAX_ROUNDS + 1, "viewing")
         yield {"type": "turn", "speaker": "agent", "text": move["utterance"], "offer": None, "phase": "viewing"}
-        if n.mode == "human":
+        if n.live:
             yield {"type": "await_seller"}
         smove = await seller_turn(MAX_ROUNDS + 1, "viewing")
         if smove is not None:

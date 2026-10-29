@@ -1,5 +1,6 @@
 // Отрисовка панелей этапов (кроме звонка — он в call.js, и графика — chart.js).
 import { html, rub, mln, pct, plural, shortDate } from "./format.js";
+import { POI_COLORS } from "./map.js";
 
 const EXAMPLES = [
   "Ищу 2-комнатную в Казани до 9 млн, у нас ребёнок — нужна школа рядом",
@@ -201,7 +202,23 @@ function metroText(m) {
   return `м. ${m.name || ""} ${m.minutes} мин ${m.mode}`.replace("  ", " ");
 }
 
-function offerCard(c, vote) {
+// что рядом с домом (по карте): «школа · 350 м», «поликлиники нет в 1 км»
+function nearbyChips(nearby = []) {
+  if (!nearby.length) return "";
+  const dist = (m) => (m < 1000 ? `${Math.round(m / 10) * 10} м` : `${(m / 1000).toFixed(1).replace(".", ",")} км`);
+  return html`<p class="features">${html.raw(nearby.map((p) => (p.dist !== null
+    ? html`<span class="feat ${p.dist <= 500 ? "is-yes" : ""}" title="${p.name}"><i class="dot" style="background:${POI_COLORS[p.kind]}"></i>${p.label} · ${dist(p.dist)}</span>`
+    : html`<span class="feat is-no">${p.label}: нет в 1 км</span>`)).join(""))}</p>`;
+}
+
+// удобства, о которых просил клиент: есть / нет по данным объявления (неизвестные — в строке «уточню»)
+function featureChips(features = []) {
+  const known = features.filter((f) => f.status !== null && f.status !== undefined);
+  if (!known.length) return "";
+  return html`<p class="features">${html.raw(known.map((f) => html`<span class="feat ${f.status ? "is-yes" : "is-no"}">${f.status ? "✓" : "✕"} ${f.label}</span>`).join(""))}</p>`;
+}
+
+function offerCard(c, vote, no) {
   const rooms = c.rooms === 0 ? "Студия" : `${c.rooms}-комн.`;
   const floor = c.floor ? `${c.floor}${c.floors ? `/${c.floors}` : ""} эт.` : "";
   const meta = [c.district, c.address, metroText(c.metro)].filter(Boolean).join(" · ");
@@ -211,12 +228,16 @@ function offerCard(c, vote) {
     <a class="offer-photo" ${c.url ? html.raw(html`href="${c.url}" target="_blank" rel="noopener noreferrer"`) : ""} aria-label="Открыть объявление на площадке">
       ${html.raw(c.photo ? html`<img src="${c.photo}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : "")}
       <span class="offer-src">${c.source_name}</span>
+      ${html.raw(no ? html`<span class="offer-no" title="Номер — можно сказать «вторая нравится»">${no}</span>` : "")}
     </a>
     <div class="offer-body">
       <div class="offer-price"><span class="num">${rub(c.price)}</span> ${html.raw(priceTag(c))}</div>
       <h3>${rooms}, ${c.area} м²${floor ? `, ${floor}` : ""}</h3>
       <p class="meta">${meta}</p>
       ${html.raw(params ? html`<p class="meta">${params}</p>` : "")}
+      ${html.raw(featureChips(c.features))}
+      ${html.raw(nearbyChips(c.nearby))}
+      ${html.raw(c.unchecked?.length ? html`<p class="missing">Не проверено по карте: ${c.unchecked.join(", ")}</p>` : "")}
       ${html.raw(c.missing?.length ? html`<p class="missing">Нет в объявлении: ${c.missing.join(", ")} — уточню по телефону</p>` : "")}
     </div>
     <div class="offer-actions">
@@ -224,6 +245,17 @@ function offerCard(c, vote) {
       <button class="vote vote-down" data-vote="down" aria-pressed="${vote === "down"}" title="Не подходит">${html.raw(ICON_DOWN)}<span>Не то</span></button>
     </div>
   </article>`;
+}
+
+function mapBlock(cards) {
+  const kinds = new Map();
+  cards.forEach((c) => (c.nearby || []).forEach((p) => p.lat && kinds.set(p.kind, p.label)));
+  const legend = [html`<span><i class="pin-dot"></i>квартира, цена в млн ₽</span>`,
+    ...[...kinds].map(([k, label]) => html`<span><i class="dot" style="background:${POI_COLORS[k]}"></i>${label}</span>`)];
+  return html`<div class="map-wrap" data-map-wrap>
+    <div class="map" data-map role="region" aria-label="Карта подборки"></div>
+    <p class="map-legend">${html.raw(legend.join(""))}</p>
+  </div>`;
 }
 
 export function selection(d, marks) {
@@ -237,7 +269,8 @@ export function selection(d, marks) {
       </div>
     </div>
     ${html.raw(d.learned?.length ? html`<div class="learned"><span>Учёл:</span>${html.raw(d.learned.map((l) => html`<span class="chip">${l}</span>`).join(""))}</div>` : "")}
-    <div class="offers">${html.raw(d.cards.map((c) => offerCard(c, vote(c.id))).join(""))}</div>
+    ${html.raw(d.cards.some((c) => c.lat && c.lng) ? mapBlock(d.cards) : "")}
+    <div class="offers">${html.raw(d.cards.map((c, i) => offerCard(c, vote(c.id), i + 1)).join(""))}</div>
     <div class="sel-actions">
       <button class="btn btn-ghost" data-selection="more">Подобрать ещё с учётом отметок</button>
       <button class="btn btn-primary" data-selection="proceed">Звонить по отмеченным <span data-liked-count>(${marks.liked.size})</span></button>

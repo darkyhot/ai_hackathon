@@ -10,6 +10,7 @@ import re
 import statistics
 from datetime import date, timedelta
 
+from .. import geo
 from ..sources import description_flags, normalize_city
 
 # ---------------------------------------------------------------- профиль запроса
@@ -48,6 +49,28 @@ def parse_money(text: str) -> int | None:
     m = re.search(r"\d{1,3}(?:[ .]\d{3}){2,}|\d{6,}", t)
     if m:
         return int(re.sub(r"\D", "", m.group(0)))
+    return None
+
+
+def parse_price_near(text: str, ref: int) -> int | None:
+    """Цена в реплике, если она похожа на цену этой квартиры (0,5–1,2 от ref).
+
+    В разговоре «млн» опускают: «давай 23 600», «23,6», «двадцать три шестьсот» (Whisper пишет «23 600»).
+    Год, этаж, метры и минуты ценой не считаются.
+    """
+    lo, hi = 0.5 * ref, 1.2 * ref
+    full = parse_money(text)
+    if full and lo <= full <= hi:
+        return full
+    t = text.lower().replace(" ", " ")
+    for m in re.finditer(r"(?<![\d.,])\d+(?: \d{3})*(?:[.,]\d+)?(?![\d.,]*\d)(?!\s*(?:год|г\.|этаж|кв|метр|м²|м2|минут|мин|лет|сот|%))", t):
+        try:
+            v = float(m.group(0).replace(" ", "").replace(",", "."))
+        except ValueError:
+            continue
+        for scale in (1, 1_000, 1_000_000):
+            if lo <= v * scale <= hi:
+                return int(round(v * scale))
     return None
 
 
@@ -193,8 +216,15 @@ def budget_chips(market: dict | None) -> list[str]:
 def profile_summary(p: dict) -> str:
     rooms = "студию" if p["rooms"] == 0 else f"{p['rooms']}-комнатную квартиру"
     where = f"г. {p['city']}" + (f", {p['okrug']}" if p.get("okrug") else "")
+    if p.get("districts"):
+        where += f" (район {', '.join(p['districts'])})"
     extra = []
-    if p["near_school"]:
+    if p.get("features"):
+        extra.append("с " + ", ".join(FEATURE_WITH[k] for k in p["features"]))
+    near = [geo.POI[k][0] for k in p.get("poi") or [] if k in geo.POI]
+    if near:
+        extra.append("рядом: " + ", ".join(near))
+    elif p["near_school"]:
         extra.append("рядом со школой")
     if p["not_first_floor"]:
         extra.append("не на первом этаже")
@@ -362,6 +392,16 @@ def bargaining_arguments(listing: dict, fp: dict) -> list[str]:
 # ---------------------------------------------------------------- отбор и ранжирование
 
 
+def _stem(name: str) -> str:
+    return name.lower().replace("ё", "е")[:5]
+
+
+def in_districts(x: dict, districts: list[str] | None) -> bool:
+    """Объявление в районе, который назвал клиент («черемушек» ~ «Черёмушки»)."""
+    d = (x.get("district") or "").lower().replace("ё", "е")
+    return bool(d and districts and any(_stem(n) in d for n in districts))
+
+
 def passes_hard_filters(x: dict, p: dict) -> bool:
     if p.get("rooms") is not None and x["rooms"] != p["rooms"]:
         return False
@@ -375,7 +415,7 @@ def passes_hard_filters(x: dict, p: dict) -> bool:
 def score_listing(x: dict, p: dict, fp: dict) -> float:
     value = max(-0.1, min(0.1, (fp["fair"] - x["price"]) / fp["fair"]))
     s = 30 * (0.5 + value / 0.2)
-    if p.get("districts") and x.get("district") and any(d.lower()[:5] in x["district"].lower() for d in p["districts"]):
+    if in_districts(x, p.get("districts")):
         s += 10  # район, который назвал клиент
     s += min(8, (x.get("days_on_market") or 0) / 15)
     if p.get("near_school") and re.search(r"школ", x.get("description") or "", re.I):
@@ -408,6 +448,78 @@ def score_listing(x: dict, p: dict, fp: dict) -> float:
     return round(s, 1)
 
 
+# ---------------------------------------------------------------- удобства, о которых просит клиент
+
+# ключ: (как назвать, что искать в пожелании и описании, вопрос продавцу)
+FEATURES = {
+    "balcony": ("балкон или лоджия", r"балкон|лоджи", "есть ли балкон или лоджия"),
+    "balcony_loggia": ("и балкон, и лоджия", r"балкон|лоджи", "есть ли и балкон, и лоджия"),
+    "wardrobe": ("гардеробная", r"гардеробн", "есть ли гардеробная"),
+    "storage": ("кладовая", r"кладов", "есть ли кладовая"),
+    "parking": ("парковка", r"паркинг|парковк|машино-?мест", "есть ли парковка или машиноместо"),
+    "separate_wc": ("раздельный санузел", r"раздельн\w*\s+(?:сан)?узел|(?:сан)?узел\w*\s+раздельн", "санузел раздельный или совмещённый"),
+    "furniture": ("мебель", r"мебел", "остаётся ли мебель"),
+}
+
+
+FEATURE_WITH = {"balcony": "балконом или лоджией", "balcony_loggia": "балконом и лоджией", "wardrobe": "гардеробной", "storage": "кладовой",
+                "parking": "парковкой", "separate_wc": "раздельным санузлом", "furniture": "мебелью"}
+
+
+# «с балконом и лоджией», «балкон, лоджия» — нужны оба; «балкон или лоджия» — любой
+BOTH_OUTDOOR = re.compile(r"(?:балкон\w*|лоджи\w*)(?:\s*,\s*(?:и\s+)?|\s+(?:и|плюс|а также|\+)\s+)"
+                          r"(?!или\b)(?:[а-яё]+\s+)?(?:балкон|лоджи)")
+
+
+def wanted_features(*texts: str | None) -> list[str]:
+    """Какие удобства клиент назвал в запросе или пожеланиях."""
+    t = " ".join(x for x in texts if x).lower().replace("ё", "е")
+    keys = [k for k, (_, pattern, _) in FEATURES.items() if k != "balcony_loggia"
+            and re.search(pattern, t) and not re.search(rf"\bбез\s+(?:\w+\s+)?(?:{pattern})", t)]
+    if "balcony" in keys and BOTH_OUTDOOR.search(t):
+        keys[keys.index("balcony")] = "balcony_loggia"
+    return keys
+
+
+def merge_features(*lists: list[str]) -> list[str]:
+    """Объединяет пожелания; «и балкон, и лоджия» уже включает «балкон или лоджия»."""
+    out = list(dict.fromkeys(k for keys in lists for k in keys))
+    return [k for k in out if not (k == "balcony" and "balcony_loggia" in out)]
+
+
+def _outdoor_both(x: dict) -> bool | None:
+    """Есть ли и балкон, и лоджия: по счётчикам площадки, иначе по описанию."""
+    total, loggias = x.get("balconies"), x.get("loggias")
+    if total is not None and loggias is not None and loggias > 0 and total - loggias > 0:
+        return True
+    text = (x.get("description") or "").lower()
+    has = [re.search(p, text) and not re.search(rf"\bбез\s+(?:\w+\s+)?{p}", text) for p in ("балкон", "лоджи")]
+    if all(has):
+        return True
+    if total is not None and loggias is not None:
+        return False  # площадка указала количество — одного из двух нет
+    return False if total == 0 else None
+
+
+def feature_status(x: dict, key: str) -> bool | None:
+    """True — есть по данным объявления, False — точно нет, None — не указано (уточним у продавца)."""
+    if key == "balcony_loggia":
+        return _outdoor_both(x)
+    if key == "balcony" and x.get("balconies"):
+        return True
+    if key == "separate_wc" and x.get("separate_wc"):
+        return True
+    text = (x.get("description") or "").lower()
+    pattern = FEATURES[key][1]
+    if re.search(rf"\bбез\s+(?:\w+\s+)?(?:{pattern})", text):
+        return False
+    if re.search(pattern, text):
+        return True
+    if key == "balcony" and x.get("balconies") == 0:
+        return False
+    return None
+
+
 # ---------------------------------------------------------------- чего не хватает в объявлении
 
 MISSING_QUESTIONS = {
@@ -419,8 +531,11 @@ MISSING_QUESTIONS = {
 ALWAYS_ASK = [("owners", "собственники", "сколько собственников и как давно квартира в собственности")]
 
 
-def missing_info(listing: dict, limit: int = 3) -> list[dict]:
-    out = [{"key": k, "label": lab, "question": q} for k, (lab, q) in MISSING_QUESTIONS.items() if listing.get(k) is None]
+def missing_info(listing: dict, limit: int = 3, features: list[str] | tuple = ()) -> list[dict]:
+    """Что спросить у продавца: сначала удобства, о которых просил клиент, потом пробелы в объявлении."""
+    out = [{"key": k, "label": FEATURES[k][0], "question": FEATURES[k][2]}
+           for k in features if k in FEATURES and feature_status(listing, k) is None]
+    out += [{"key": k, "label": lab, "question": q} for k, (lab, q) in MISSING_QUESTIONS.items() if listing.get(k) is None]
     out += [{"key": k, "label": lab, "question": q} for k, lab, q in ALWAYS_ASK]
     return out[:limit]
 

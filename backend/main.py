@@ -9,8 +9,10 @@ import json
 import logging
 from dataclasses import fields
 
+import httpx
+
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -18,7 +20,7 @@ from . import economics, sources
 from .agent import orchestrator as O
 from .config import ROOT, settings
 from .llm import get_llm
-from . import stt
+from . import phone, stt
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -50,6 +52,10 @@ class ClientMessage(BaseModel):
     disliked: list[str] = []
 
 
+class SpeakRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+
+
 class ProductRequest(BaseModel):
     product: str
     amount: int = Field(ge=0)
@@ -66,6 +72,7 @@ async def health():
         "reason": getattr(llm, "reason", None),
         "cities": sources.SUPPORTED_CITIES,
         "stt": stt.status(),
+        "phone": phone.status(),
     }
 
 
@@ -86,6 +93,32 @@ async def speech_to_text(request: Request):
         return await stt.transcribe(audio)
     except Exception as exc:
         raise HTTPException(500, f"Не удалось распознать: {exc}") from exc
+
+
+def _check_pin(request: Request):
+    if not phone.allowed(request.headers.get("X-Phone-Pin")):
+        raise HTTPException(403, "Нужен PIN для звонков (PHONE_PIN в .env сервера)")
+
+
+@app.get("/api/phone")
+async def phone_config(request: Request):
+    """SIP-доступ Exolve для звонка из браузера. На публичном сервере — только с PIN."""
+    _check_pin(request)
+    try:
+        return {**await phone.credentials(), "seller_phone": settings.seller_phone}
+    except phone.PhoneError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/tts")
+async def text_to_speech(req: SpeakRequest, request: Request):
+    """Голос агента для телефонного звонка: текст -> WAV."""
+    _check_pin(request)
+    try:
+        audio = await phone.synthesize(req.text)
+    except (phone.PhoneError, httpx.HTTPError) as exc:
+        raise HTTPException(502, f"Синтез речи не удался: {exc}") from exc
+    return Response(audio, media_type="audio/wav")
 
 
 @app.post("/api/session")

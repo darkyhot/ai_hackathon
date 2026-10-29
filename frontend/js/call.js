@@ -4,6 +4,12 @@ import { bindMic, mic, recorder } from "./voice.js";
 
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+const SIM_NOTES = {
+  auto: "Симуляция: продавца играет ИИ, настоящему продавцу прототип не звонит",
+  human: "Продавец — вы: отвечайте текстом или голосом",
+  phone: "Настоящий звонок через МТС Exolve: продавец — вы, на телефоне",
+};
+
 export function createCall(payload) {
   return {
     listing: payload.listing,
@@ -67,7 +73,7 @@ export function renderCall(c, onSellerSubmit) {
       <ol class="phases" data-phases>
         ${html.raw(phases.map(([k, t]) => html`<li data-phase="${k}" class="${phaseClass(c, k, order)}">${t}</li>`).join(""))}
       </ol>
-      <span class="sim-note">${c.mode === "human" ? "Продавец — вы: отвечайте текстом или голосом" : "Симуляция: продавца играет ИИ, настоящему продавцу прототип не звонит"}</span>
+      <span class="sim-note">${SIM_NOTES[c.mode] || SIM_NOTES.auto}</span>
     </div>
     ${html.raw(c.questions.length ? html`<p class="call-questions">Агент уточнит: ${c.questions.map((q) => q.label).join(", ")}</p>` : "")}
     <div class="counter">
