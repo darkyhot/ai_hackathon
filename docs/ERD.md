@@ -17,6 +17,7 @@ erDiagram
     visitors ||--o{ agent_sessions : ""
     visitors ||--o{ user_listing_marks : ""
     agent_sessions ||--o{ events : ""
+    agent_sessions ||--o{ chat_events : "лента диалога"
     agent_sessions ||--o{ calls : ""
     agent_sessions ||--o{ deals : ""
 
@@ -69,6 +70,16 @@ erDiagram
         string status "running | completed | cancelled | ..."
         string llm_provider
         json result
+        string title "название в списке диалогов"
+        datetime updated_at "последнее событие"
+    }
+    chat_events {
+        int id PK
+        string agent_session_id FK
+        int seq "номер события в диалоге"
+        string type "message, confirm, resolved, result, step, turn, done, idle, ..."
+        json payload "событие целиком, как его видел клиент"
+        datetime created_at
     }
     events {
         int id PK
