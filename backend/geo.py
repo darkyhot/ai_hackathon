@@ -18,6 +18,9 @@ import time
 
 import httpx
 
+from . import db
+from .db import repo
+
 log = logging.getLogger(__name__)
 
 RADIUS = 1000  # м — «рядом»: 12–15 минут пешком
@@ -51,6 +54,7 @@ AREAS = {"park", "water"}
 STEP_DEG = 0.0006  # ~60 м между сохранёнными точками контура
 
 LIVE_CHUNK = 25    # квартир в одном живом запросе
+POI_TTL_DAYS = 30  # что рядом с домом: пересчитываем раз в месяц
 LIVE_TIMEOUT = 60  # с — главный сервер Overpass бывает задумчив
 
 _live_cache: dict[tuple[float, float, str], dict | None] = {}
@@ -235,7 +239,20 @@ async def nearby(listings: list[dict], kinds: list[str]) -> bool:
     points = [x for x in listings if x.get("lat") and x.get("lng")]
     if not kinds or not points:
         return True
-    return await _live(points, kinds)
+    # что уже проверяли по карте для этих квартир — из базы агента (школы и парки за месяц не переезжают)
+    known = db.safe(repo.load_features, [x["id"] for x in points], prefix="poi:", max_age_days=POI_TTL_DAYS, default={}) or {}
+    todo = []
+    for x in points:
+        have = {k: known[x["id"]][f"poi:{k}"] for k in kinds if f"poi:{k}" in known.get(x["id"], {})}
+        x["nearby"] = {**(x.get("nearby") or {}), **have}
+        if len(have) < len(kinds):
+            todo.append(x)
+    if not todo:
+        return True
+    if not await _live(todo, kinds):
+        return False
+    db.safe(repo.save_features, [(x["id"], f"poi:{k}", x["nearby"][k], "map") for x in todo for k in kinds])
+    return True
 
 
 def has_all(x: dict, kinds: list[str]) -> bool:

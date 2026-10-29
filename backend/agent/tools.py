@@ -12,6 +12,7 @@ from datetime import date, timedelta
 
 from .. import geo
 from ..sources import description_flags, normalize_city
+from .mortgage import market_rate
 
 # ---------------------------------------------------------------- профиль запроса
 
@@ -30,6 +31,10 @@ EMPTY_PROFILE = {
     "kitchen_min": None,
     "area_min": None,
     "metro_max_minutes": None,
+    "children": None,         # сколько детей (0 — нет) — для семейной ипотеки
+    "youngest_age": None,     # возраст младшего ребёнка, полных лет
+    "matcap": None,           # есть неизрасходованный маткапитал: True / сумма
+    "housing": None,          # secondary | new | both | None (не сказал)
     "wishes": [],
 }
 
@@ -139,13 +144,16 @@ def merge_profile(raw: dict, base: dict | None = None) -> dict:
     p = dict(base or EMPTY_PROFILE)
     for key in EMPTY_PROFILE:
         v = raw.get(key)
-        if v in (None, "", [], False):  # «нет» в уточнении не отменяет сказанное раньше
+        # «детей нет», студия, «маткапитала нет» — содержательные ответы, а не пустые поля
+        meaningful = (key in ("children", "youngest_age", "rooms") and v == 0 and v is not False) or (key == "matcap" and v is False)
+        if v in (None, "", [], False) and not meaningful:  # «нет» в уточнении не отменяет сказанное раньше
             continue
         if key == "wishes" and p.get("wishes"):
             v = list(dict.fromkeys([*p["wishes"], *v]))
         p[key] = v
     p["city"] = normalize_city(p["city"]) or p["city"]
-    for key, cast in (("rooms", int), ("budget_max", int), ("kitchen_min", float), ("area_min", float), ("metro_max_minutes", int)):
+    for key, cast in (("rooms", int), ("budget_max", int), ("kitchen_min", float), ("area_min", float), ("metro_max_minutes", int),
+                      ("children", int), ("youngest_age", int)):
         try:
             p[key] = cast(p[key]) if p[key] is not None else None
         except (TypeError, ValueError):
@@ -159,6 +167,8 @@ def merge_profile(raw: dict, base: dict | None = None) -> dict:
         p["okrug"] = None
     if p.get("payment") not in (None, "cash", "mortgage_ready", "mortgage_saving"):
         p["payment"] = None
+    if p.get("housing") not in (None, "secondary", "new", "both"):
+        p["housing"] = None
     if p.get("budget_max"):
         p["budget_unknown"] = False
     p["wishes"] = [str(w) for w in (p.get("wishes") or [])][:6]
@@ -235,12 +245,13 @@ def profile_summary(p: dict) -> str:
     if p["metro_max_minutes"]:
         extra.append(f"до метро до {p['metro_max_minutes']} мин")
     tail = (", " + ", ".join(extra)) if extra else ""
-    return f"Ищу {rooms} в {where} до {fmt(p['budget_max'])}{tail}."
+    market = {"new": " в новостройке", "both": " в новостройке или на вторичке", "secondary": " на вторичном рынке"}.get(p.get("housing"), "")
+    return f"Ищу {rooms}{market} в {where} до {fmt(p['budget_max'])}{tail}."
 
 
 # ---------------------------------------------------------------- ипотека
 
-DEMO_RATE = 0.169  # допущение; в проде — ставка из предодобрения Сбера
+DEMO_RATE = market_rate(0.2)  # рыночная ставка Сбера при взносе 20% (mortgage.py); в проде — из предодобрения
 
 
 def annuity(principal: float, annual_rate: float, years: int) -> float:
@@ -259,31 +270,37 @@ def deal_costs(price: int, loan: int) -> dict:
     }
 
 
-def mortgage_scenarios(price: int, monthly_income: int | None = None, down_available: int | None = None) -> dict:
+def mortgage_scenarios(price: int, monthly_income: int | None = None, down_available: int | None = None,
+                       rate: float | None = None, program: str | None = None, matcap: int = 0) -> dict:
+    """Три сценария ипотеки. rate=None — рыночная ставка Сбера (зависит от взноса), иначе ставка программы.
+    matcap — маткапитал: идёт во взнос, своих нужно меньше."""
     costs = sum(deal_costs(price, int(price * 0.8)).values())
     variants = [("Взнос 20%, 30 лет", 0.20, 30), ("Взнос 20%, 20 лет", 0.20, 20), ("Взнос 30%, 25 лет", 0.30, 25)]
     rows = []
     for title, dp_share, years in variants:
         down = int(price * dp_share)
         loan = price - down
-        pay = annuity(loan, DEMO_RATE, years)
+        r = rate if rate is not None else market_rate(dp_share)
+        pay = annuity(loan, r, years)
         rows.append({
-            "title": title, "down_payment": down, "loan": loan, "years": years,
+            "title": title, "down_payment": down, "loan": loan, "years": years, "rate": r,
             "monthly": int(round(pay, -2)),
             "overpay": int(round(pay * years * 12 - loan, -3)),
             "income_needed": int(round(pay * 2, -3)),
             "fits_income": None if monthly_income is None else pay * 2 <= monthly_income,
-            "cash_needed": down + costs,
-            "savings_gap": 0 if down_available is None else max(0, down + costs - down_available),
+            "cash_needed": max(0, down - matcap) + costs,
+            "savings_gap": 0 if down_available is None else max(0, down - matcap + costs - down_available),
         })
     best = next((r for r in rows if r["fits_income"] is not False), rows[0])
     return {
-        "rate": DEMO_RATE,
+        "rate": best["rate"],
+        "program": program or "Рыночная ипотека Сбера",
+        "matcap": matcap,
         "deal_costs": costs,
         "scenarios": rows,
         "recommended": best["title"],
         "approved": int(price * 0.8),
-        "per_100k_discount": int(round(annuity(100_000, DEMO_RATE, best["years"]))),
+        "per_100k_discount": int(round(annuity(100_000, best["rate"], best["years"]))),
     }
 
 
@@ -320,7 +337,11 @@ def listing_factor(x: dict) -> float:
 
 
 def fair_price(listing: dict, pool: list[dict]) -> dict:
-    """Медиана приведённой цены м² по аналогам из выдачи × поправки объекта × поправка на торг."""
+    """Медиана приведённой цены м² по аналогам из выдачи × поправки объекта × поправка на торг.
+    Новостройку сравниваем с новостройками, вторичку — со вторичкой (если аналогов хватает)."""
+    market = [x for x in pool if bool(x.get("is_new")) == bool(listing.get("is_new"))]
+    if len(market) >= 4:
+        pool = market
     same = [x for x in pool if x["id"] != listing["id"] and x["rooms"] == listing["rooms"]
             and 0.7 <= x["area"] / listing["area"] <= 1.4]
     near = []
@@ -385,6 +406,8 @@ def bargaining_arguments(listing: dict, fp: dict) -> list[str]:
         args.append(f"состояние: {listing['condition']} — покупателю нужны вложения в ремонт")
     if listing.get("year") and listing["year"] < 1990:
         args.append(f"дом {listing['year']} года")
+    if listing.get("is_new"):
+        args.append("уточню скидку застройщика при ипотеке или полной оплате — у застройщиков это частая практика")
     args.append("покупатель с одобренной ипотекой Сбера, деньги через сервис безопасных расчётов, выход на сделку за 2–3 недели")
     return args
 
@@ -502,7 +525,10 @@ def _outdoor_both(x: dict) -> bool | None:
 
 
 def feature_status(x: dict, key: str) -> bool | None:
-    """True — есть по данным объявления, False — точно нет, None — не указано (уточним у продавца)."""
+    """True — есть по данным объявления, False — точно нет, None — не указано (уточним у продавца).
+    Сказанное продавцом в звонке (x["confirmed"]) важнее объявления."""
+    if (x.get("confirmed") or {}).get(key) is not None:
+        return bool(x["confirmed"][key])
     if key == "balcony_loggia":
         return _outdoor_both(x)
     if key == "balcony" and x.get("balconies"):
@@ -531,8 +557,22 @@ MISSING_QUESTIONS = {
 ALWAYS_ASK = [("owners", "собственники", "сколько собственников и как давно квартира в собственности")]
 
 
+NEW_BUILD_QUESTIONS = [
+    ("deadline", "срок сдачи", "когда сдача дома и выдача ключей, были ли переносы"),
+    ("condition", "отделка", "какая отделка — черновая, предчистовая или чистовая"),
+    ("contract", "договор и эскроу", "по какому договору продаёте — ДДУ с эскроу, и есть ли скидка при ипотеке"),
+]
+
+
 def missing_info(listing: dict, limit: int = 3, features: list[str] | tuple = ()) -> list[dict]:
-    """Что спросить у продавца: сначала удобства, о которых просил клиент, потом пробелы в объявлении."""
+    """Что спросить у продавца: сначала удобства, о которых просил клиент, потом пробелы в объявлении.
+    В новостройке — срок сдачи, отделка, договор (собственников и прописанных там нет)."""
+    if listing.get("is_new"):
+        out = [{"key": k, "label": FEATURES[k][0], "question": FEATURES[k][2]}
+               for k in features if k in FEATURES and feature_status(listing, k) is None]
+        out += [{"key": k, "label": lab, "question": q} for k, lab, q in NEW_BUILD_QUESTIONS
+                if k == "contract" or listing.get(k) is None]
+        return out[:limit]
     out = [{"key": k, "label": FEATURES[k][0], "question": FEATURES[k][2]}
            for k in features if k in FEATURES and feature_status(listing, k) is None]
     out += [{"key": k, "label": lab, "question": q} for k, (lab, q) in MISSING_QUESTIONS.items() if listing.get(k) is None]
@@ -584,6 +624,16 @@ def client_slots(today: date | None = None) -> list[str]:
 
 
 def viewing_checklist(listing: dict) -> list[str]:
+    if listing.get("is_new"):
+        items = [
+            "Сверить квартиру с планировкой из ДДУ: площадь, окна, высота потолков",
+            "Посмотреть шоурум или готовые квартиры застройщика — качество отделки",
+            "Проверить двор, парковку, школу и сад рядом — что уже построено, а что в планах",
+            "Уточнить, как будут принимать квартиру: акт осмотра и устранение недостатков",
+        ]
+        if not listing.get("finished"):
+            items.insert(0, "Посмотреть стройку: идут ли работы, совпадает ли этаж с графиком")
+        return items
     items = [
         "Сверить паспорт продавца с выпиской ЕГРН",
         "Проверить окна, батареи и стояки",
@@ -600,10 +650,43 @@ def viewing_checklist(listing: dict) -> list[str]:
     return items
 
 
-def deal_plan(listing: dict, final_price: int, down_payment: int | None, today: date | None = None) -> dict:
-    """down_payment=None — покупка без ипотеки."""
+def deal_plan(listing: dict, final_price: int, down_payment: int | None, today: date | None = None,
+              rate: float | None = None, program: str | None = None) -> dict:
+    """План сделки по датам. down_payment=None — без ипотеки. rate и program — выбранная ипотечная программа.
+    Новостройка — ДДУ и эскроу; переуступка — уступка прав по ДДУ через безопасные расчёты."""
     today = today or date.today()
-    if down_payment is None:
+    is_new = bool(listing.get("is_new"))
+    assignment = is_new and "уступк" in (listing.get("sale_type") or "")
+    cash = down_payment is None
+    loan = 0 if cash else max(0, final_price - down_payment)
+    years = 0 if cash else 30
+    rate = None if cash else (DEMO_RATE if rate is None else rate)
+    program = None if cash else (program or "Рыночная ипотека Сбера")
+    credit = None if cash else f"{program}: кредит {fmt(loan)} на {years} лет под {rate * 100:.1f}%".replace(".", ",")
+
+    if is_new and not assignment:
+        steps = [
+            (0, "Цена согласована с застройщиком", "Итог звонка и запись разговора — в журнале сделки"),
+            (1, "Проверка застройщика и дома", "ЕИСЖС: разрешение, проектная декларация, эскроу, сроки"),
+            *([] if cash else [(2, "Заявка на ипотеку по объекту", credit),
+                               (5, "Страхование", "Жизнь заёмщика — СберСтрахование; имущество — после сдачи дома")]),
+            (7, "Подписание ДДУ", "Электронная подпись, договор участия в долевом строительстве"),
+            (7, "Эскроу-счёт", "Деньги лежат в банке до сдачи дома, застройщик получит их после ввода"),
+            (14, "Регистрация ДДУ", "Росреестр электронно — без визитов"),
+        ]
+        costs = {"Электронная регистрация ДДУ": 2_000}
+    elif assignment:
+        steps = [
+            (0, "Цена согласована с продавцом", "Итог звонка и запись разговора — в журнале сделки"),
+            (1, "Проверка ДДУ и цепочки", "Оплачен ли ДДУ, согласие застройщика, ЕИСЖС: дом и сроки"),
+            *([] if cash else [(2, "Заявка на ипотеку по объекту", credit),
+                               (5, "Страхование", "Жизнь заёмщика — СберСтрахование; имущество — после сдачи дома")]),
+            (7, "Подписание договора уступки", "Электронная подпись, уступка прав по ДДУ"),
+            (7, "Безопасные расчёты", "Деньги уходят продавцу только после регистрации уступки"),
+            (14, "Регистрация уступки", "Росреестр электронно — без визитов"),
+        ]
+        costs = {"Сервис безопасных расчётов": 6_900, "Электронная регистрация уступки": 2_000}
+    elif cash:
         steps = [
             (0, "Цена согласована", "Итог звонка и запись разговора — в журнале сделки"),
             (2, "Выписки ЕГРН и проверка продавца", "Собственники, обременения, долги, банкротство"),
@@ -612,33 +695,29 @@ def deal_plan(listing: dict, final_price: int, down_payment: int | None, today: 
             (5, "Безопасные расчёты", "Деньги уходят продавцу только после регистрации"),
             (9, "Электронная регистрация", "Росреестр без визитов в МФЦ"),
         ]
-        return {
-            "cash": True, "loan": 0, "down_payment": final_price, "years": 0, "monthly": 0, "monthly_saved": 0,
-            "costs": {"Сервис безопасных расчётов": 6_900, "Электронная регистрация": 2_000},
-            "timeline": [{"date": (today + timedelta(days=d)).isoformat(), "title": t, "note": n} for d, t, n in steps],
-        }
-    loan = max(0, final_price - down_payment)
-    years = 30
-    pay = annuity(loan, DEMO_RATE, years)
-    pay_before = annuity(max(0, listing["price"] - down_payment), DEMO_RATE, years)
-    steps = [
-        (0, "Цена согласована", "Итог звонка и запись разговора — в журнале сделки"),
-        (1, "Заявка на ипотеку по объекту", f"Кредит {fmt(loan)} на {years} лет"),
-        (3, "Оценка залога", "Аккредитованная оценочная компания, онлайн-заказ"),
-        (4, "Выписки ЕГРН и проверка продавца", "Собственники, обременения, долги, банкротство"),
-        (6, "Страхование", "Имущество, жизнь, титул — СберСтрахование"),
-        (8, "Подписание договора", "Электронная подпись, договор купли-продажи в Домклик"),
-        (8, "Безопасные расчёты", "Деньги уходят продавцу только после регистрации"),
-        (12, "Электронная регистрация", "Росреестр без визитов в МФЦ"),
-    ]
+        costs = {"Сервис безопасных расчётов": 6_900, "Электронная регистрация": 2_000}
+    else:
+        steps = [
+            (0, "Цена согласована", "Итог звонка и запись разговора — в журнале сделки"),
+            (1, "Заявка на ипотеку по объекту", credit),
+            (3, "Оценка залога", "Аккредитованная оценочная компания, онлайн-заказ"),
+            (4, "Выписки ЕГРН и проверка продавца", "Собственники, обременения, долги, банкротство"),
+            (6, "Страхование", "Имущество, жизнь, титул — СберСтрахование"),
+            (8, "Подписание договора", "Электронная подпись, договор купли-продажи в Домклик"),
+            (8, "Безопасные расчёты", "Деньги уходят продавцу только после регистрации"),
+            (12, "Электронная регистрация", "Росреестр без визитов в МФЦ"),
+        ]
+        costs = deal_costs(final_price, loan)
+    if is_new and not cash:
+        costs = {"Страхование жизни, 1-й год": int(round(loan * 0.004, -2)), **costs}
+    pay = 0 if cash else annuity(loan, rate, years)
+    pay_before = 0 if cash else annuity(max(0, listing["price"] - down_payment), rate, years)
     return {
-        "cash": False,
-        "loan": loan,
-        "down_payment": down_payment,
-        "years": years,
-        "monthly": int(round(pay, -2)),
-        "monthly_saved": int(round(pay_before - pay, -1)),
-        "costs": deal_costs(final_price, loan),
+        "cash": cash, "new": is_new, "assignment": assignment,
+        "loan": loan, "down_payment": final_price if cash else down_payment, "years": years,
+        "rate": rate, "program": program,
+        "monthly": int(round(pay, -2)), "monthly_saved": int(round(pay_before - pay, -1)),
+        "costs": costs,
         "timeline": [{"date": (today + timedelta(days=d)).isoformat(), "title": t, "note": n} for d, t, n in steps],
     }
 

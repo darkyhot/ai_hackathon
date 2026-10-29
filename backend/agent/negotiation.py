@@ -15,11 +15,12 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from typing import AsyncIterator, Awaitable, Callable
 
 from ..llm import LLMClient, LLMError
 from . import prompts
-from .tools import bargaining_arguments, fmt, parse_money, parse_price_near
+from .tools import FEATURES, bargaining_arguments, feature_status, fmt, parse_money, parse_price_near
 
 log = logging.getLogger(__name__)
 
@@ -218,23 +219,67 @@ async def parse_human_seller(llm: LLMClient, n: Negotiation, text: str) -> dict:
     return {"utterance": text, "ask": ask, "accept": accept}
 
 
+CORRECTION_RANGES = {"kitchen": (2, 60), "area": (10, 500), "floor": (-1, 120), "floors": (1, 120),
+                     "year": (1800, date.today().year + 6), "rooms": (0, 10)}
+
+
+def _listing_brief(x: dict) -> str:
+    """Что сказано в объявлении — чтобы модель отличала уточнение от повтора."""
+    parts = [f"{x.get('rooms')}-комн." if x.get("rooms") else "студия", f"площадь {x.get('area')} м²",
+             f"кухня {x['kitchen']} м²" if x.get("kitchen") else "кухня не указана",
+             f"этаж {x.get('floor')}/{x.get('floors')}" if x.get("floor") else "этаж не указан",
+             f"год {x['year']}" if x.get("year") else "год не указан", f"ремонт: {x.get('condition') or 'не указан'}"]
+    parts += [f"{FEATURES[k][0]}: {'да' if feature_status(x, k) else 'нет' if feature_status(x, k) is False else 'не указано'}"
+              for k in ("balcony", "separate_wc")]
+    return "; ".join(parts)
+
+
+def clean_corrections(raw: dict | None, x: dict) -> dict:
+    """Уточнения продавца -> только правдоподобные и новые: в диапазоне, не совпадают с объявлением."""
+    out: dict = {}
+    for key, value in (raw or {}).items():
+        if value is None or value == "":
+            continue
+        if key in CORRECTION_RANGES:
+            try:
+                v = float(str(value).replace(",", "."))
+            except ValueError:
+                continue
+            lo, hi = CORRECTION_RANGES[key]
+            if not lo <= v <= hi:
+                continue
+            v = round(v, 1) if key in ("kitchen", "area") else int(v)
+            if x.get(key) is None or abs(float(x[key]) - v) > 0.05:
+                out[key] = v
+        elif key == "condition" and isinstance(value, str) and 0 < len(value.strip()) <= 40:
+            if value.strip().lower() != (x.get("condition") or "").lower():
+                out[key] = value.strip()
+        elif key in FEATURES and isinstance(value, bool) and feature_status(x, key) is not value:
+            out[key] = value
+    floors = out.get("floors", x.get("floors"))
+    if "floor" in out and floors and out["floor"] > floors:
+        out.pop("floor")
+    return out
+
+
 async def extract_learned(llm: LLMClient, n: Negotiation) -> dict:
-    """Что агент узнал за звонок и на какое время договорились."""
+    """Что агент узнал за звонок, на какое время договорились и какие параметры продавец уточнил."""
     if llm.name != "offline":
         try:
-            data = await llm.chat_json(
-                [{"role": "system", "content": prompts.EXTRACT_CALL.replace("{labels}", ", ".join(f"«{q['label']}»" for q in n.questions))},
-                 {"role": "user", "content": n.transcript()}],
-                temperature=0.0, tag="extract_call",
-            )
+            system = (prompts.EXTRACT_CALL.replace("{labels}", ", ".join(f"«{q['label']}»" for q in n.questions))
+                      .replace("{listing}", _listing_brief(n.listing)))
+            data = await llm.chat_json([{"role": "system", "content": system}, {"role": "user", "content": n.transcript()}],
+                                       temperature=0.0, tag="extract_call")
             facts = {str(k): str(v) for k, v in (data.get("facts") or {}).items() if v}
-            return {"facts": facts, "viewing": n.viewing or data.get("viewing")}
+            corrections = clean_corrections(data.get("corrections") if isinstance(data.get("corrections"), dict) else None,
+                                            n.listing)
+            return {"facts": facts, "viewing": n.viewing or data.get("viewing"), "corrections": corrections}
         except LLM_FAIL as exc:
             log.warning("extract fallback: %s", exc)
     facts = {}
     if n.mode == "auto":
         facts = {q["label"]: n.seller["facts"][q["key"]] for q in n.questions if q["key"] in n.seller["facts"]}
-    return {"facts": facts, "viewing": n.viewing}
+    return {"facts": facts, "viewing": n.viewing, "corrections": {}}
 
 
 def normalize_price(v) -> int | None:
@@ -465,6 +510,7 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
         "fallback": n.used_fallback,
         "learned": learned["facts"],
         "viewing": learned["viewing"],
+        "corrections": learned["corrections"],
         "transcript": n.history,
     }
 

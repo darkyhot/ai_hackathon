@@ -10,6 +10,14 @@ const SIM_NOTES = {
   phone: "Настоящий звонок через МТС Exolve: продавец — вы, на телефоне",
 };
 
+function pageNote(p) {
+  if (!p) return "";
+  const at = p.checked_at ? new Date(p.checked_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) : "";
+  return p.alive
+    ? html`<p class="page-check is-ok">✓ Объявление в продаже${at ? ` · проверено в ${at}` : ""}</p>`
+    : html`<p class="page-check" title="${p.note}">Не удалось проверить, что объявление в продаже (${p.note}) — уточню у продавца</p>`;
+}
+
 export function createCall(payload) {
   return {
     listing: payload.listing,
@@ -17,6 +25,7 @@ export function createCall(payload) {
     authority: payload.authority,
     arguments: payload.arguments || [],
     questions: payload.questions || [],
+    page: payload.page || null, // проверка страницы объявления перед звонком
     sellerName: payload.seller_name || "Продавец",
     sellerRole: payload.seller_role || payload.listing.seller_role || "",
     phase: null,
@@ -75,6 +84,7 @@ export function renderCall(c, onSellerSubmit) {
       </ol>
       <span class="sim-note">${SIM_NOTES[c.mode] || SIM_NOTES.auto}</span>
     </div>
+    ${html.raw(pageNote(c.page))}
     ${html.raw(c.questions.length ? html`<p class="call-questions">Агент уточнит: ${c.questions.map((q) => q.label).join(", ")}</p>` : "")}
     <div class="counter">
       <div class="label">Лучшая цена продавца сейчас</div>

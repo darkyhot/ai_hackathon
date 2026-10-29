@@ -44,5 +44,16 @@ class Settings:
     # PIN для звонков на публичном сервере: без него любой посетитель звонил бы за ваш счёт
     phone_pin: str = os.getenv("PHONE_PIN", "")
 
+    # База: пользователи, история диалогов, объявления с признаками
+    database_url: str = os.getenv("DATABASE_URL") or f"sqlite:///{ROOT / 'backend' / 'data' / 'app.db'}"
+    auth_session_days: int = int(os.getenv("AUTH_SESSION_DAYS", "30") or 30)
+    cookie_secure: bool = _bool("COOKIE_SECURE", False)  # true — за HTTPS
+
+    # Ночной обход объявлений: время (ЧЧ:ММ, пусто — выключен), сколько страниц выдачи на поиск,
+    # сколько пропавших объявлений проверить за раз
+    refresh_at: str = os.getenv("REFRESH_AT", "").strip()
+    refresh_pages: int = int(os.getenv("REFRESH_PAGES", "3") or 3)
+    refresh_check_limit: int = int(os.getenv("REFRESH_CHECK_LIMIT", "40") or 40)
+
 
 settings = Settings()

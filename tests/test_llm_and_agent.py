@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import httpx
 
+from backend import db
 from backend import economics as E
 from backend import geo
 from backend.agent import finance as F
@@ -20,6 +21,8 @@ from backend.agent import tools as T
 from backend.llm import Tool, build_llm
 from backend.llm.gigachat import GigaChatClient, to_gigachat_functions, to_gigachat_messages
 from backend.sources import cian
+
+db.configure("sqlite://")  # база агента — в памяти: тесты не пишут в backend/data
 
 
 def run(coro):

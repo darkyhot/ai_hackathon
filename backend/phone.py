@@ -44,9 +44,12 @@ def configured() -> bool:
 async def _post(path: str, body: dict, timeout: float = 20) -> dict:
     if not configured():
         raise PhoneError("Нет EXOLVE_API_KEY в .env")
-    async with httpx.AsyncClient(timeout=timeout, transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0")) as client:
-        r = await client.post(f"{API}/{path}", json=body,
-                              headers={"Authorization": f"Bearer {settings.exolve_api_key}"})
+    try:
+        async with httpx.AsyncClient(timeout=timeout, transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0")) as client:
+            r = await client.post(f"{API}/{path}", json=body,
+                                  headers={"Authorization": f"Bearer {settings.exolve_api_key}"})
+    except httpx.HTTPError as exc:  # сеть до api.exolve.ru — понятная ошибка, а не 500
+        raise PhoneError(f"Нет связи с Exolve ({type(exc).__name__}). Проверьте интернет и попробуйте ещё раз.") from exc
     if r.status_code != 200:
         raise PhoneError(f"Exolve {path}: HTTP {r.status_code} {r.text[:200]}")
     return r.json()

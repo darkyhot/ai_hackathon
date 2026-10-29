@@ -564,7 +564,7 @@ table.scen td.neg { color: var(--red); }
   .tab { flex: 1; font-size: 14px; padding: 7px 8px; }
   .brand-sub { display: none; }
   .workspace { grid-template-columns: 1fr; padding: 12px 16px; }
-  .chat { position: static; height: auto; max-height: 70vh; }
+  .chat { position: relative; top: auto; height: auto; max-height: 70vh; }
   .stage { order: -1; }
   .panel { padding: 20px; }
   .welcome { padding: 28px 20px; }
@@ -653,3 +653,86 @@ table.scen td.neg { color: var(--red); }
   border-color: transparent; border-top-color: var(--green); border-right-color: var(--blue);
   animation: talk-spin 1.4s linear infinite;
 }
+
+/* ---------- диалоги: список как в чат-ботах */
+.chats-btn {
+  display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; cursor: pointer;
+  font-weight: 600; font-size: 14px; color: var(--ink); padding: 4px 6px; margin-left: -6px; border-radius: var(--radius-s);
+}
+.chats-btn:hover, .chats-btn[aria-expanded="true"] { background: var(--canvas); }
+.chats-panel {
+  position: absolute; z-index: 5; top: 44px; left: 12px; right: 12px; max-height: min(60vh, 520px); overflow-y: auto;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); box-shadow: var(--shadow);
+  padding: 6px; display: flex; flex-direction: column; gap: 2px;
+}
+.chat-item {
+  display: flex; flex-direction: column; gap: 2px; text-align: left; border: 0; background: none; cursor: pointer;
+  padding: 9px 10px; border-radius: var(--radius-s); color: var(--ink); width: 100%;
+}
+.chat-item:hover { background: var(--canvas); }
+.chat-item.is-current { background: var(--green-soft); }
+.chat-new { font-weight: 600; color: var(--green-strong); }
+.chat-title { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-meta { font-size: 12px; color: var(--ink-3); }
+.chat-live { color: var(--green-strong); font-weight: 600; }
+.chat-live::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--green); margin-right: 5px; vertical-align: middle; }
+.chats-empty { margin: 8px 10px; font-size: 13px; color: var(--ink-3); }
+
+/* ---------- аккаунт */
+.account { position: relative; }
+.account-btn {
+  display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--surface);
+  border-radius: 999px; padding: 4px 12px; cursor: pointer; font-size: 13px; color: var(--ink); font-weight: 600;
+}
+.account-btn .avatar {
+  width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; margin-left: -6px;
+  background: var(--green); color: #fff; font-size: 12px;
+}
+.account-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 200px; padding: 6px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); box-shadow: var(--shadow);
+}
+.account-menu .account-email { margin: 6px 10px; font-size: 12px; color: var(--ink-3); overflow-wrap: anywhere; }
+.account-menu button { width: 100%; text-align: left; border: 0; background: none; padding: 8px 10px; border-radius: var(--radius-s); cursor: pointer; color: var(--ink); }
+.account-menu button:hover { background: var(--canvas); }
+dialog.auth {
+  border: 0; border-radius: var(--radius-l); padding: 0; width: min(400px, calc(100vw - 32px));
+  background: var(--surface); color: var(--ink); box-shadow: var(--shadow);
+}
+dialog.auth::backdrop { background: rgba(10, 20, 15, .45); }
+.auth-form { display: flex; flex-direction: column; gap: 12px; padding: 24px; }
+.auth-form h3 { margin: 0; font-size: 20px; }
+.auth-lead { margin: 0; font-size: 14px; color: var(--ink-2); }
+.auth-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--ink-2); }
+.auth-form input { border: 1px solid var(--line); border-radius: var(--radius-s); padding: 10px 12px; background: var(--canvas); color: var(--ink); font-size: 15px; }
+.auth-form input:focus { outline: none; border-color: var(--green); background: var(--surface); }
+.auth-error { margin: 0; font-size: 13px; color: var(--red); }
+.auth-actions { display: flex; gap: 8px; }
+.auth-actions .btn { flex: 1; }
+.cookie-note {
+  position: fixed; z-index: 30; left: 16px; bottom: 16px; max-width: 420px; display: flex; gap: 12px; align-items: center;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); box-shadow: var(--shadow); padding: 12px 14px;
+}
+.cookie-note p { margin: 0; font-size: 13px; color: var(--ink-2); }
+@media (max-width: 860px) {
+  .account-name { display: none; }
+  .cookie-note { right: 16px; }
+}
+.store-line { margin: 0 0 12px; font-size: 13px; color: var(--ink-2); }
+
+/* ---------- ипотечные программы, новостройки */
+.program-head { margin: 0 0 8px; }
+.program .program-sub { font-size: 13px; font-weight: 500; color: var(--ink-3); letter-spacing: 0; }
+.program.is-off { opacity: .85; }
+.program.is-off .big { color: var(--ink-3); }
+.program-why { margin: 12px 0 0; padding-left: 18px; font-size: 13px; color: var(--ink-2); display: grid; gap: 4px; }
+.tag-blue { background: color-mix(in srgb, var(--blue) 14%, transparent); color: var(--blue); }
+.offer-new { margin: 2px 0 4px; font-size: 13px; color: var(--ink-2); }
+.offer-pay { margin: 6px 0 4px; font-size: 13px; color: var(--ink-2); }
+.offer-pay b { font-size: 14px; color: var(--ink); }
+.offer-pay.is-family b { color: var(--green-strong); }
+.page-check { margin: 4px 28px 0; font-size: 13px; color: var(--ink-3); }
+.page-check.is-ok { color: var(--green-strong); }
+@media (max-width: 860px) { .page-check { margin-left: 20px; margin-right: 20px; } }
+.meta.corrected { color: var(--blue); }

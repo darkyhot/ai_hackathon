@@ -96,6 +96,14 @@ class GigaChatClient(LLMClient):
         self._token_expires_at = float(data.get("expires_at", 0)) / 1000 or time.time() + 1700
         return self._token
 
+    async def models(self) -> list[str]:
+        """GET /models — список доступных моделей (заодно проверка ключа и токена)."""
+        token = await self._get_token()
+        r = await self._http.get("/models", headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+        if r.status_code != 200:
+            raise LLMError(f"GigaChat /models {r.status_code}: {r.text[:300]}")
+        return [m.get("id") for m in r.json().get("data", [])]
+
     async def chat(
         self,
         messages,

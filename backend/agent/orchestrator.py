@@ -1,26 +1,30 @@
 """Конвейер агента: запрос -> финансы -> поиск -> подбор -> проверка -> звонок -> просмотр -> сделка -> итог.
 
-Сессия выполняется фоновой задачей и пишет события в очередь; HTTP-слой отдаёт
-их браузеру через SSE. Где решение за клиентом, конвейер ждёт POST /confirm.
-Текст и голос клиента приходят через POST /message: ответ на уточняющий вопрос,
-пожелание к подборке или просто заметка, которую агент учтёт дальше.
+Сессия выполняется фоновой задачей. Каждое событие (сообщение, карточка, шаг, реплика звонка) получает номер,
+пишется в ленту диалога в базе и уходит во все открытые вкладки (SSE). Закрытая вкладка агента не останавливает:
+диалог можно открыть снова — сначала придёт история, потом живые события.
+Где решение за клиентом, конвейер ждёт POST /confirm. Текст и голос клиента приходят через POST /message.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from .. import economics, geo, sources
+from .. import db, economics, geo, sources
+from ..db import repo
 from ..llm import LLMClient, LLMError
 from . import finance as F
+from . import mortgage as M
 from . import negotiation as N
 from . import preferences as P
-from . import prompts, seller_sim
+from . import prompts, qa, seller_sim
 from . import tools as T
 
 log = logging.getLogger(__name__)
@@ -35,7 +39,13 @@ class Session:
     id: str
     query: str
     llm: LLMClient
-    events: asyncio.Queue = field(default_factory=asyncio.Queue)
+    visitor_id: str | None = None
+    user_id: int | None = None
+    base_profile: dict | None = None  # продолжение диалога: что агент уже знал о запросе
+    seq: int = 0                      # номер последнего события диалога
+    history: list[dict] = field(default_factory=list)  # события этого запуска (если база недоступна)
+    subscribers: set[asyncio.Queue] = field(default_factory=set)  # открытые вкладки
+    idle_since: float = field(default_factory=time.monotonic)  # когда закрылась последняя вкладка
     pending: dict[str, asyncio.Future] = field(default_factory=dict)
     seller_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     task: asyncio.Task | None = None
@@ -43,16 +53,44 @@ class Session:
     prefs: P.Prefs = field(default_factory=P.Prefs)
     notes: list[str] = field(default_factory=list)
     finance: dict | None = None
+    mortgage: dict | None = None   # ипотечные программы: что подходит и по какой ставке считаем
+    stage: str | None = None       # текущий шаг — для ответов на вопросы
+    shown: list = field(default_factory=list)  # последняя подборка (карточки со справедливой ценой)
+    current: dict | None = None    # квартира, по которой идёт звонок: {"listing", "fair"}
+    answer_only: bool = False      # продолжение диалога вопросом: только ответ, без нового поиска
+    prev_status: str = "running"   # статус диалога до вопроса — после ответа возвращаем его
     opened: dict[str, int] = field(default_factory=dict)
     journal: dict = field(default_factory=dict)
     llm_degraded: bool = False
     map_warned: bool = False
 
     # ------------------------------------------------------------- события
+    def push(self, type_: str, **payload: Any) -> dict:
+        """Событие в ленту диалога: номер, база, все открытые вкладки. Синхронно — порядок не путается."""
+        self.seq += 1
+        ev = json.loads(json.dumps({"type": type_, **payload, "seq": self.seq}, ensure_ascii=False, default=str))
+        self.history.append(ev)
+        db.safe(repo.save_event, self.id, self.seq, type_, ev)
+        for q in list(self.subscribers):
+            q.put_nowait(ev)
+        if type_ in ("done", "error"):
+            status = payload.get("status", "error") if type_ == "done" else "error"
+            db.safe(repo.update_chat, self.id, status=status, **({"profile": self.saved_profile()} if self.profile else {}))
+        return ev
+
     async def emit(self, type_: str, **payload: Any) -> None:
-        await self.events.put({"type": type_, **payload})
+        self.push(type_, **payload)
+
+    def saved_profile(self) -> dict:
+        """Профиль для продолжения диалога — без цен рынка и служебных полей."""
+        return {k: v for k, v in self.profile.items() if k not in ("market",)}
+
+    def save_profile(self) -> None:
+        db.safe(repo.update_chat, self.id, profile=json.loads(json.dumps(self.saved_profile(), default=str)))
 
     async def step(self, n: int, status: str) -> None:
+        if status == "active":
+            self.stage = STEPS[n - 1]
         await self.emit("step", step=n, title=STEPS[n - 1], status=status)
 
     async def say(self, text: str) -> None:
@@ -69,15 +107,25 @@ class Session:
             self.pending.pop(kind, None)
 
     def resolve(self, kind: str, approved: bool, data: dict | None) -> bool:
+        """Решение клиента. В ленту уходит событие resolved (с подписью кнопки — для истории),
+        а если решение сказано голосом — и сама фраза клиента."""
         fut = self.pending.get(kind)
         if not fut or fut.done():
             return False
-        fut.set_result({"approved": approved, "data": data or {}})
+        data = dict(data or {})
+        label, said = data.pop("_label", None), data.pop("_said", None)
+        if said:
+            self.push("message", role="user", text=str(said)[:500])
+        self.push("resolved", kind=kind, approved=approved, label=label)
+        fut.set_result({"approved": approved, "data": data})
         return True
 
     async def receive_text(self, text: str, marks: dict | None = None) -> str:
         """Текст клиента: ответ на вопрос, пожелание к подборке или заметка на потом."""
         await self.emit("message", role="user", text=text)
+        if qa.is_question(text):  # «что такое СБР?» — отвечаем, текущий шаг ждёт дальше
+            asyncio.create_task(qa.answer(self, text))
+            return "question"
         if self.resolve("clarify", True, {"text": text}):
             return "answer"
         marks = marks or {}
@@ -100,10 +148,50 @@ class Session:
 SESSIONS: dict[str, Session] = {}
 
 
-def create_session(query: str, llm: LLMClient) -> Session:
-    s = Session(id=uuid.uuid4().hex[:12], query=query.strip(), llm=llm)
+def create_session(query: str, llm: LLMClient, visitor_id: str | None = None, user_id: int | None = None) -> Session:
+    s = Session(id=uuid.uuid4().hex[:12], query=query.strip(), llm=llm, visitor_id=visitor_id, user_id=user_id)
     SESSIONS[s.id] = s
+    db.safe(repo.create_chat, s.id, s.query, visitor_id, user_id)
     return s
+
+
+def continue_session(chat_id: str, text: str, llm: LLMClient) -> Session:
+    """Продолжить диалог, в котором агент уже закончил (или сервер перезапускался): новый запуск в той же ленте.
+    Агент помнит запрос: «а если трёшку?» — тот же город и бюджет, но 3 комнаты."""
+    info = db.safe(lambda d: (lambda c: c and (c.profile, c.visitor_id, c.user_id, c.last_seq, c.status))(repo.get_chat(d, chat_id)))
+    profile, vid, uid, last_seq, status = info or (None, None, None, 0, "running")
+    s = Session(id=chat_id, query=text.strip(), llm=llm, visitor_id=vid, user_id=uid, base_profile=profile or None)
+    s.seq = last_seq or 0
+    if profile and qa.is_question(text):  # «сколько я переплачу?» в завершённом диалоге — ответ без нового поиска
+        s.answer_only, s.profile, s.prev_status = True, dict(profile), status
+    SESSIONS[chat_id] = s
+    db.safe(repo.update_chat, chat_id, status="running")
+    return s
+
+
+def running(s: Session | None) -> bool:
+    return s is not None and s.task is not None and not s.task.done()
+
+
+IDLE_DONE_S = 30 * 60        # завершённый диалог без открытых вкладок — убрать из памяти (история в базе)
+IDLE_WAITING_S = 6 * 3600    # агент ждёт решения, а вкладок нет 6 часов — остановить (продолжить можно сообщением)
+
+
+def reap_idle(now: float | None = None) -> list[str]:
+    """Освобождает память от брошенных сессий. Вызывается периодически из main."""
+    now = time.monotonic() if now is None else now
+    gone = []
+    for sid, s in list(SESSIONS.items()):
+        if s.subscribers:
+            continue
+        idle = now - s.idle_since
+        if running(s) and idle > IDLE_WAITING_S:
+            s.task.cancel()
+            db.safe(repo.update_chat, sid, status="paused")
+        elif not running(s) and idle > IDLE_DONE_S:
+            gone.append(sid)
+            del SESSIONS[sid]
+    return gone
 
 
 # ------------------------------------------------------------- помощники
@@ -185,7 +273,7 @@ def drop_wishes(text: str, prefs: P.Prefs) -> list[str]:
 
 def card(x: dict, meta: dict, prefs: P.Prefs) -> dict:
     m = meta[x["id"]]
-    return {**x, "fair": m["fair"], "score": m["total"],
+    return {**x, "fair": m["fair"], "score": m["total"], "pay": m.get("pay"),
             "features": [{"label": T.FEATURES[k][0], "status": T.feature_status(x, k)} for k in prefs.features],
             "nearby": geo.summary(x, prefs.poi),
             "unchecked": [geo.POI[k][0] for k in prefs.poi if k not in (x.get("nearby") or {})],
@@ -228,7 +316,87 @@ async def score_into(pool: list[dict], comps: list[dict], profile: dict, meta: d
     for x in pool:
         if x["id"] not in meta:
             fp = T.fair_price(x, comps)
-            meta[x["id"]] = {"fair": fp, "score": T.score_listing(x, profile, fp)}
+            score = T.score_listing(x, profile, fp)
+            # платёж по подходящей программе — у каждой квартиры свой (новостройка может пройти по семейной)
+            pay = M.listing_payment(x, profile) if profile.get("payment") not in (None, "cash") else None
+            if pay and pay["program"] == "семейная":
+                score += 6  # платёж заметно ниже — для семьи это важнее пары метров
+            meta[x["id"]] = {"fair": fp, "score": score, "pay": pay}
+
+
+CORRECTION_LABELS = {"kitchen": ("кухня", " м²"), "area": ("площадь", " м²"), "floor": ("этаж", ""), "floors": ("этажей в доме", ""),
+                     "year": ("год постройки", ""), "rooms": ("комнат", ""), "condition": ("ремонт", "")}
+
+
+async def apply_corrections(s: Session, listing: dict, corrections: dict, persist: bool) -> None:
+    """Продавец уточнил параметры: применяем к квартире (просмотр, сделка, карточки) и, если продавец настоящий, —
+    запоминаем в базе поверх объявления. Слова ИИ-продавца (симуляция) в общую базу не попадают."""
+    said = []
+    for key, value in corrections.items():
+        if key in CORRECTION_LABELS:
+            label, unit = CORRECTION_LABELS[key]
+            was = listing.get(key)
+            listing.setdefault("listed", {})[key] = was
+            listing[key] = value
+            said.append(f"{label} {value:g}{unit}" if isinstance(value, (int, float)) else f"{label}: {value}")
+            if was is not None:
+                said[-1] += f" (в объявлении — {was:g}{unit})" if isinstance(was, (int, float)) else f" (в объявлении — {was})"
+        else:
+            listing.setdefault("confirmed", {})[key] = value
+            said.append(f"{T.FEATURES[key][0]} — {'есть' if value else 'нет'}")
+    if persist:
+        sources.store.correct(listing["id"], corrections)
+    await s.say("Продавец уточнил параметры: " + "; ".join(said) + "."
+                + (" Запомнил — в подборках у этой квартиры будет так." if persist else ""))
+
+
+async def ask_family(s: Session, profile: dict) -> dict:
+    """Семья и маткапитал — от них зависит ставка. Спрашиваем один раз и только то, чего не понял из запроса."""
+    known = M.normalize_family(profile)
+    if known["children"] == 0 or (known["children"] and known["youngest_age"] is not None and profile.get("matcap") is not None):
+        return known
+    r = await s.ask(
+        "family", "Семья и маткапитал",
+        "От этого зависит ставка: семейная ипотека — от 10% вместо рыночных ~17,5%, а маткапитал можно направить во взнос.",
+        defaults={"children": known["children"] if known["children"] is not None else 1,
+                  "youngest_age": known["youngest_age"] if known["youngest_age"] is not None else "",
+                  "matcap": known["matcap"] or (M.MATCAP_FIRST if profile.get("matcap") else 0),
+                  "matcap_default": M.MATCAP_FIRST},
+    )
+    return M.normalize_family(r["data"]) if r["approved"] else {"children": 0, "youngest_age": None, "matcap": 0}
+
+
+async def ask_housing(s: Session, profile: dict, progs: dict | None) -> None:
+    """Где искать. Если семейная не проходит на вторичке, но прошла бы в новостройке, — предлагаем выбор.
+    Тип жилья, который клиент назвал сам, не переспрашиваем."""
+    if profile.get("housing") in ("new", "secondary", "both"):
+        return
+    alt = next((c for c in (progs or {}).get("programs", []) if c["key"] == "family_new"), None)
+    if not alt:
+        profile["housing"] = "secondary"
+        return
+    market = next(c for c in progs["programs"] if c["key"] == "market")
+    cap = M.max_family_price(profile["city"], profile)
+    limit = f" для квартир до {T.fmt(cap)} при взносе 20%" if cap and cap < profile["budget_max"] else ""
+    r = await s.ask(
+        "housing", "Где искать",
+        f"Семейная ипотека работает в новостройках{limit}: ставка {alt['rate'] * 100:.0f}%, платёж около "
+        f"{T.fmt(alt['monthly'])} вместо {T.fmt(market['monthly'])} на вторичке. Искать и там, и там?",
+    )
+    profile["housing"] = r["data"].get("housing", "secondary") if r["approved"] else "secondary"
+    await s.say({"both": "Ищу и в новостройках, и на вторичке — у каждой квартиры покажу платёж по подходящей программе.",
+                 "new": "Ищу только в новостройках — посчитаю по семейной ипотеке, где она проходит.",
+                 "secondary": "Хорошо, ищу на вторичке."}[profile["housing"]])
+
+
+async def choose_program(s: Session, profile: dict, price: int) -> dict:
+    """Какая ипотека подходит: рыночная или семейная — с объяснением, почему, и разницей платежа."""
+    profile.update(await ask_family(s, profile))
+    progs = M.programs(price, profile["city"], profile, housing=profile.get("housing"),
+                       is_secondary=profile.get("housing") != "new")
+    s.mortgage = progs
+    await s.say(progs["explanation"])
+    return progs
 
 
 async def ask_affordability(s: Session, profile: dict, market: dict | None) -> tuple[dict, dict]:
@@ -261,7 +429,9 @@ async def pipeline(s: Session) -> None:
 
     # 1. Запрос и уточнения: сначала город и комнаты, потом бюджет — с ценами рынка перед глазами
     await s.step(1, "active")
-    profile = await parse_request(s, s.query)
+    if s.base_profile:
+        await s.say("Продолжаю этот диалог — помню запрос: " + (s.base_profile.get("summary") or "").rstrip(".") + ".")
+    profile = await parse_request(s, s.query, base=s.base_profile)
     market = None
     fin_inputs = None
     for _ in range(5):
@@ -269,13 +439,13 @@ async def pipeline(s: Session) -> None:
         missing = [m for m in T.missing_required(profile) if m != "budget_max"]
         chips: list[str] = []
         if unsupported:
-            question = (f"Пока ищу объявления в городах: {', '.join(sources.SUPPORTED_CITIES)}. "
-                        f"Город «{profile['city']}» ещё не подключён — какой из этих подойдёт?")
+            question = (f"Город «{profile['city']}» на Циане я пока не знаю: ищу в {len(sources.SUPPORTED_CITIES)} городах — "
+                        "областных центрах и крупных городах Подмосковья. Какой подойдёт?")
             profile["city"] = None
-            chips = sources.SUPPORTED_CITIES[:4]
+            chips = sources.FEATURED_CITIES[:4]
         elif missing:
             question = T.clarify_question(missing)
-            chips = sources.SUPPORTED_CITIES[:4] if "city" in missing else ["1 комната", "2 комнаты", "3 комнаты"]
+            chips = sources.FEATURED_CITIES[:4] if "city" in missing else ["1 комната", "2 комнаты", "3 комнаты"]
         elif profile.get("budget_max") is None and profile.get("budget_unknown"):
             fin_inputs, aff = await ask_affordability(s, profile, market)
             profile["budget_max"] = aff["budget"]
@@ -320,6 +490,7 @@ async def pipeline(s: Session) -> None:
         return
     if r["data"].get("budget_max"):
         profile["budget_max"] = int(r["data"]["budget_max"])
+    s.save_profile()  # с этого места диалог можно продолжить даже после перезапуска сервера
     await s.step(1, "done")
 
     # 2. Финансы — только то, что нужно этому клиенту: наличные / ипотека / накопить на взнос
@@ -335,14 +506,18 @@ async def pipeline(s: Session) -> None:
         payment = r["data"].get("payment", "mortgage_ready") if r["approved"] else "mortgage_ready"
     profile["payment"] = payment
     s.finance = None
+    progs = await choose_program(s, profile, budget) if payment != "cash" else None
+    chosen = next(c for c in progs["programs"] if c["key"] == progs["chosen"]) if progs else None
+    m_kw = ({"rate": progs["rate"] if progs["chosen"] != "market" else None, "program": chosen["title"],
+             "matcap": (progs["matcap"] or {}).get("amount", 0)} if progs else {})
     if payment == "cash":
         await s.emit("result", step=2, kind="finance", data={"mode": "cash", "price": budget})
         await s.say("Покупка без ипотеки: деньги уйдут продавцу через сервис безопасных расчётов только после регистрации права. "
                     "Пока ищем квартиру, сумму можно держать на накопительном счёте — по желанию.")
     elif payment == "mortgage_ready":
-        mortgage = T.mortgage_scenarios(budget, (fin_inputs or {}).get("monthly_income"))
+        mortgage = T.mortgage_scenarios(budget, (fin_inputs or {}).get("monthly_income"), **m_kw)
         rec = next(x for x in mortgage["scenarios"] if x["title"] == mortgage["recommended"])
-        await s.emit("result", step=2, kind="finance", data={"mode": "mortgage", "mortgage": mortgage})
+        await s.emit("result", step=2, kind="finance", data={"mode": "mortgage", "mortgage": mortgage, "programs": progs})
         await s.say(f"Ипотека: при взносе {T.fmt(rec['down_payment'])} и сроке {rec['years']} лет платёж около {T.fmt(rec['monthly'])} в месяц. "
                     f"Каждые 100 000 ₽, которые я сторгую, — минус {T.fmt(mortgage['per_100k_discount'])} в месяц.")
     else:  # ипотека, взнос ещё копим — тут и нужен финансовый помощник
@@ -354,10 +529,12 @@ async def pipeline(s: Session) -> None:
                 defaults=F.DEFAULT_INPUTS, price=budget,
             )
             fin_inputs = r["data"] if r["approved"] else {}
-            fin = F.plan(budget, fin_inputs)
+            fin = F.plan(budget, fin_inputs, matcap=m_kw.get("matcap", 0))
+        elif m_kw.get("matcap"):  # план считали до вопроса про маткапитал — пересчитаем с ним
+            fin = F.plan(budget, fin["inputs"], matcap=m_kw["matcap"])
         s.finance = fin
-        mortgage = T.mortgage_scenarios(budget, fin["inputs"]["monthly_income"], fin["available"])
-        await s.emit("result", step=2, kind="finance", data={"mode": "saving", "finance": fin, "mortgage": mortgage})
+        mortgage = T.mortgage_scenarios(budget, fin["inputs"]["monthly_income"], fin["available"], **m_kw)
+        await s.emit("result", step=2, kind="finance", data={"mode": "saving", "finance": fin, "mortgage": mortgage, "programs": progs})
         rec = ", ".join(f"{a['name'].lower()} — {T.fmt(a['amount_now'])}" for a in fin["allocation"] if a["amount_now"])
         await s.say(f"{fin['verdict']} Рекомендую разложить накопления: {rec}." + (f" {fin['risk_note']}" if fin["risk_note"] else ""))
         if fin["gap"] and not fin["fits_horizon"]:
@@ -374,6 +551,9 @@ async def pipeline(s: Session) -> None:
             await s.step(2, "done")
             await s.emit("done", status="saving")
             return
+    await ask_housing(s, profile, progs)
+    s.profile = profile
+    s.save_profile()
     await s.step(2, "done")
 
     # 3. Поиск: сначала целые квартиры в рамках, потом район и пожелания. Чего нет — говорим честно и предлагаем, что поменять.
@@ -385,13 +565,22 @@ async def pipeline(s: Session) -> None:
     strict = False
     for attempt in range(5):
         where = profile["city"] + (f", {profile['okrug']}" if profile.get("okrug") else "")
-        await s.say(f"Ищу на Циане: {where}, {T.rooms_text(profile['rooms'])}, до {T.fmt(profile['budget_max'])}.")
+        market_txt = {"new": "новостройки", "both": "новостройки и вторичка"}.get(profile.get("housing"), "вторичный рынок")
+        await s.say(f"Ищу на Циане: {where}, {T.rooms_text(profile['rooms'])}, {market_txt}, до {T.fmt(profile['budget_max'])}.")
         listings, report = await sources.collect(profile)
+        # что агент уже видел на Циане за неделю по такому запросу — с посчитанными признаками и «что рядом»
+        known = sources.stored(profile, exclude={x["id"] for x in listings})
+        if known:
+            listings += known
+            report.append({"source": "База агента", "count": len(known), "status": "db",
+                           "note": f"видели на Циане за {sources.store.SEEN_DAYS} дней"})
+            await s.say(f"Добавил из своей базы {len(known)} {T.plural(len(known), 'объявление', 'объявления', 'объявлений')}, "
+                        "которые видел на Циане за неделю: признаки и «что рядом» по ним уже посчитаны.")
         pool = [x for x in listings if T.passes_hard_filters(x, profile)]
         page = 1
         if not pool:
             await s.emit("result", step=3, kind="search", data={"report": report, "total": len(listings), "matched": 0, "rows": []})
-            if report and report[0]["status"] == "unavailable":
+            if report and all(r["status"] == "unavailable" for r in report):
                 await s.say(f"Циан сейчас не отдаёт объявления ({report[0]['note']}). Попробуйте чуть позже.")
                 await s.emit("done", status="empty")
                 return
@@ -485,6 +674,8 @@ async def pipeline(s: Session) -> None:
         profile["poi"] = [k for k in profile.get("poi") or [] if geo.POI[k][0] not in dropped]
         s.prefs.features, s.prefs.poi = list(profile["features"]), list(profile["poi"])
         profile["summary"] = T.profile_summary(profile)
+        s.profile = profile
+        s.save_profile()
         await s.emit("result", step=1, kind="profile", data=profile)
     else:
         await s.say("Так и не нашёл подходящих объявлений. Начните новый запрос с другими параметрами.")
@@ -496,9 +687,13 @@ async def pipeline(s: Session) -> None:
     order = ranked(pool, meta, s.prefs)
     rows = [{"id": x["id"], "address": x["address"], "district": x.get("district"), "area": x["area"],
              "price": x["price"], **meta[x["id"]]["fair"]} for x in order[:8]]
-    for r in report:  # с учётом страниц, догруженных ради района и пожеланий
-        r["count"] = sum(1 for x in listings if x.get("source_name") == r["source"])
-    await s.emit("result", step=3, kind="search", data={"report": report, "total": len(listings), "matched": len(pool), "rows": rows})
+    for r in report:  # с учётом страниц, догруженных ради района и пожеланий; из базы — отдельной строкой
+        if r["status"] == "db":
+            r["count"] = sum(1 for x in listings if x.get("stored_at"))
+        else:
+            r["count"] = sum(1 for x in listings if not x.get("stored_at") and bool(x.get("is_new")) == r.get("new", False))
+    await s.emit("result", step=3, kind="search", data={"report": report, "total": len(listings), "matched": len(pool), "rows": rows,
+                                                        "store": sources.store.stats(profile)})
     src =", ".join(f"{r['source']} — {r['count']}" + (" (сохранённый срез)" if r["status"] == "snapshot" else "") for r in report)
     over = sum(1 for x in pool if meta[x["id"]]["fair"]["overprice_pct"] > 1)
     await s.say(f"Нашёл объявлений: {src}. Под ваши параметры подходят {len(pool)}; "
@@ -536,8 +731,9 @@ async def pipeline(s: Session) -> None:
                  and x.get("district") not in s.prefs.districts_minus]
         batch = liked + fresh[:BATCH]
         shown |= {x["id"] for x in batch}
+        s.shown = [card(x, meta, s.prefs) for x in batch]
         await s.emit("result", step=4, kind="selection", data={
-            "round": round_no, "cards": [card(x, meta, s.prefs) for x in batch], "liked": s.prefs.liked,
+            "round": round_no, "cards": s.shown, "liked": s.prefs.liked,
             "disliked": s.prefs.disliked, "learned": s.prefs.learned(), "remaining": len(fresh) - BATCH,
         })
         if round_no == 1:
@@ -575,19 +771,33 @@ async def pipeline(s: Session) -> None:
 
     # 6–9 по кандидатам (если цена не устроила — следующий)
     for listing in candidates[:3]:
+        await s.step(6, "active")
+        # объявление могли снять или поменять, пока клиент выбирал: открываем страницу и берём свежие параметры
+        page = await sources.verify(listing)
+        if page["alive"] is False:
+            await s.say(f"Объявление {listing['address']} сняли с публикации — звонить некуда, перехожу к следующему.")
+            continue
+        if page["listing"]:
+            fresh = page.pop("listing")
+            if fresh["price"] != listing["price"]:
+                await s.say(f"Цена в объявлении изменилась: было {T.fmt(listing['price'])}, стало {T.fmt(fresh['price'])}. "
+                            "Торгуюсь от новой.")
+            listing.update(fresh)
+            meta[listing["id"]]["fair"] = T.fair_price(listing, comps)
+        else:
+            page.pop("listing", None)
         fp = meta[listing["id"]]["fair"]
         authority = min(profile["budget_max"], listing["price"], fp["high"])
         seller = seller_sim.build(listing)
         questions = call_questions(listing, s.prefs)
         slots = T.client_slots()
-        await s.step(6, "active")
         r = await s.ask(
             "call", "Звонок продавцу",
             f"Звоню по объекту {listing['address']}: уточню {', '.join(q['label'] for q in questions)}, "
             f"поторгуюсь до {T.fmt(fp['target'])} (без вашего согласия — не выше {T.fmt(authority)}) и договорюсь о просмотре.",
             listing=listing, fair=fp, authority=authority, arguments=T.bargaining_arguments(listing, fp),
             legal=checks[listing["id"]], questions=questions, seller_name=seller["name"], seller_role=seller["role"],
-            simulated=True,
+            simulated=True, page=page,
         )
         if not r["approved"]:
             await s.say("Пропускаю этот объект, перехожу к следующему.")
@@ -597,18 +807,21 @@ async def pipeline(s: Session) -> None:
                             slots=slots, mode=mode)
         s.journal = {"listing_id": listing["id"], "base_price": listing["price"], "fixed_at": date.today().isoformat(),
                      "url": listing.get("url")}
+        s.current = {"listing": listing, "fair": fp}
         end = None
         while not s.seller_queue.empty():  # реплики от прошлого звонка не нужны
             s.seller_queue.get_nowait()
         human = (lambda: N.queue_input(s.seller_queue)) if neg.live else None
         async for ev in N.run(s.llm, neg, human_input=human):
-            await s.events.put(ev)
+            s.push(ev["type"], **{k: v for k, v in ev.items() if k != "type"})
             if ev["type"] == "call_end":
                 end = ev
         if neg.used_fallback:
             await mark_degraded(s, LLMError("модель не ответила в звонке"))
         if end["learned"]:
             await s.say("Узнал у продавца: " + "; ".join(f"{k} — {v}" for k, v in end["learned"].items()) + ".")
+        if end.get("corrections"):
+            await apply_corrections(s, listing, end["corrections"], persist=neg.live)
         price = end["price"]
         savings = listing["price"] - price
         over_budget = price > profile["budget_max"]
@@ -648,15 +861,22 @@ async def pipeline(s: Session) -> None:
             down = None
         else:
             down = s.finance["down_payment"] if s.finance else int(profile["budget_max"] * 0.2)
-        plan = T.deal_plan(listing, price, down)
+        # ставка — программы, которая подходит именно этой квартире (новостройка может пройти по семейной)
+        pay = M.listing_payment(listing, profile, price=price, down_share=down / price) if down else None
+        plan = T.deal_plan(listing, price, down, rate=pay["rate"] if pay else None, program=pay["title"] if pay else None)
         await s.emit("result", step=8, kind="deal", data=plan)
         if plan["cash"]:
             await s.say("Собрал план сделки без ипотеки: проверка продавца, договор с электронной подписью, "
                         "деньги через сервис безопасных расчётов, электронная регистрация — около 9 дней.")
         else:
-            await s.say(f"Собрал план сделки: ипотека {T.fmt(plan['loan'])}, платёж {T.fmt(plan['monthly'])} в месяц "
-                        f"(на {T.fmt(plan['monthly_saved'])} меньше благодаря торгу). Регистрация — электронно, деньги через СБР.")
-        r = await s.ask("sign", "Подписание договора", "Подписать договор купли-продажи электронной подписью?")
+            tail = ("Деньги — продавцу через СБР после регистрации уступки." if plan["assignment"]
+                    else "Деньги — на эскроу-счёте до сдачи дома, ДДУ зарегистрируем электронно." if plan["new"]
+                    else "Регистрация — электронно, деньги через СБР.")
+            await s.say(f"Собрал план сделки: {plan['program'].lower()} {T.fmt(plan['loan'])}, платёж {T.fmt(plan['monthly'])} в месяц "
+                        f"(на {T.fmt(plan['monthly_saved'])} меньше благодаря торгу). {tail}")
+        contract = ("договор уступки прав по ДДУ" if plan["assignment"]
+                    else "договор участия в долевом строительстве (ДДУ)" if plan["new"] else "договор купли-продажи")
+        r = await s.ask("sign", "Подписание договора", f"Подписать {contract} электронной подписью?")
         if not r["approved"]:
             await s.say("Подписание отложено. Все документы сохранены — вернёмся, когда будете готовы.")
             await s.emit("done", status="paused")
@@ -690,6 +910,12 @@ async def pipeline(s: Session) -> None:
 
 async def run_session(s: Session) -> None:
     try:
+        if s.answer_only:
+            await s.emit("message", role="user", text=s.query)
+            await qa.answer(s, s.query)
+            s.push("idle")  # агент ответил и снова ждёт — без нового поиска
+            db.safe(repo.update_chat, s.id, status=s.prev_status)
+            return
         await pipeline(s)
     except asyncio.CancelledError:
         raise
