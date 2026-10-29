@@ -724,3 +724,33 @@ dialog.modal::backdrop { background: rgba(10, 20, 15, .45); }
 
 .page-check { margin: 4px 0 0; font-size: 12px; color: var(--ink-3); }
 .page-check.is-ok { color: var(--green-strong); }
+
+/* ------------------------------------------------------------------ список диалогов */
+.chat-head { gap: 10px; }
+.chat-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--ink-2); font-weight: 600; }
+.chats-btn {
+  display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font: inherit; font-size: 13px; font-weight: 600; padding: 5px 10px; border-radius: 999px; cursor: pointer; flex: none;
+}
+.chats-btn:hover, .chats-btn[aria-expanded="true"] { border-color: var(--green-line); background: var(--green-soft); }
+.chat-drawer {
+  position: absolute; inset: 52px 0 0 0; z-index: 5; background: var(--surface); display: flex; flex-direction: column;
+  border-top: 1px solid var(--line);
+}
+.drawer-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 20px; }
+.chat-list { list-style: none; margin: 0; padding: 0 12px 16px; overflow-y: auto; display: grid; gap: 4px; align-content: start; }
+.chat-item {
+  width: 100%; text-align: left; border: 0; background: none; font: inherit; color: var(--ink); cursor: pointer;
+  padding: 10px 12px; border-radius: var(--radius-s); display: grid; gap: 2px;
+}
+.chat-item:hover { background: var(--canvas); }
+.chat-item.is-on { background: var(--green-soft); }
+.chat-item:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
+.chat-item-title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-item-meta { font-size: 12px; color: var(--ink-3); }
+.chat-empty { padding: 16px 12px; font-size: 14px; color: var(--ink-3); }
+@media (max-width: 860px) {
+  .chat { position: relative; min-height: 420px; }
+}
+.history-open { cursor: pointer; }
+.history-open:hover { box-shadow: inset 0 0 0 1.5px var(--green-line); }

@@ -12,7 +12,7 @@ from typing import Any, Callable, Iterable
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
-from .models import (AgentSession, Call, CallFact, Complex, CrawlRun, Deal, Developer, Event, Feature,
+from .models import (AgentSession, Call, ChatEvent, CallFact, Complex, CrawlRun, Deal, Developer, Event, Feature,
                      FinanceProfile, Listing, ListingFeature, ListingPhoto, ListingPrice, SecurityCheck,
                      TrackedSearch, User, UserListingMark, Visitor, utcnow)
 
@@ -355,9 +355,61 @@ def start_agent_session(db: Session, sid: str, query: str, visitor_id: str | Non
                         provider: str | None) -> None:
     if visitor_id:
         touch_visitor(db, visitor_id)
-    db.add(AgentSession(id=sid, query=query, visitor_id=visitor_id, user_id=user_id, llm_provider=provider))
+    db.add(AgentSession(id=sid, query=query, visitor_id=visitor_id, user_id=user_id, llm_provider=provider,
+                        title=" ".join(query.split())[:120], updated_at=utcnow()))
     db.flush()
     log_event(db, "session_started", {"query": query}, visitor_id, user_id, sid)
+
+
+# ================================================================ диалоги (история чатов)
+
+
+def save_chat_event(db: Session, sid: str, seq: int, event: dict) -> None:
+    db.add(ChatEvent(agent_session_id=sid, seq=seq, type=event.get("type", ""), payload=event))
+    s = db.get(AgentSession, sid)
+    if s is not None:
+        s.updated_at = utcnow()
+
+
+def chat_events(db: Session, sid: str, after: int = 0) -> list[dict]:
+    rows = db.scalars(select(ChatEvent).where(ChatEvent.agent_session_id == sid, ChatEvent.seq > after)
+                      .order_by(ChatEvent.seq)).all()
+    return [{**r.payload, "seq": r.seq} for r in rows]
+
+
+def last_seq(db: Session, sid: str) -> int:
+    return db.scalar(select(func.max(ChatEvent.seq)).where(ChatEvent.agent_session_id == sid)) or 0
+
+
+def get_chat(db: Session, sid: str) -> AgentSession | None:
+    return db.get(AgentSession, sid)
+
+
+def can_open_chat(chat: AgentSession | None, visitor_id: str | None, user_id: int | None) -> bool:
+    """Диалог видит тот браузер, где он начат, и пользователь, к которому он привязан после входа."""
+    if chat is None:
+        return False
+    return bool((visitor_id and chat.visitor_id == visitor_id) or (user_id is not None and chat.user_id == user_id))
+
+
+def chat_list(db: Session, user_id: int | None, visitor_id: str | None, limit: int = 50) -> list[dict]:
+    conds = []
+    if user_id is not None:
+        conds.append(AgentSession.user_id == user_id)
+    if visitor_id:
+        conds.append(AgentSession.visitor_id == visitor_id)
+    if not conds:
+        return []
+    rows = db.scalars(select(AgentSession).where(or_(*conds))
+                      .order_by(func.coalesce(AgentSession.updated_at, AgentSession.started_at).desc()).limit(limit)).all()
+    out = []
+    for r in rows:
+        if not db.scalar(select(ChatEvent.id).where(ChatEvent.agent_session_id == r.id).limit(1)):
+            continue  # диалог не начался (страницу закрыли сразу) — в списке не нужен
+        out.append({"id": r.id, "title": r.title or r.query[:80], "status": r.status,
+                    "summary": (r.profile or {}).get("summary"),
+                    "updated_at": (r.updated_at or r.started_at).isoformat(timespec="seconds") + "Z"})
+    return out
 
 
 def update_agent_session(db: Session, sid: str, **fields) -> None:

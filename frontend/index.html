@@ -33,8 +33,19 @@
   <main id="view-deal" class="workspace">
     <aside class="chat" aria-label="Диалог с агентом">
       <div class="chat-head">
-        <span>Диалог с агентом</span>
+        <button class="chats-btn" id="chatsBtn" aria-expanded="false" aria-controls="chatDrawer" title="Мои диалоги">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
+          <span>Диалоги</span>
+        </button>
+        <span class="chat-title" id="chatTitle">Новый диалог</span>
         <button class="link-btn" id="resetBtn" hidden>Новый запрос</button>
+      </div>
+      <div class="chat-drawer" id="chatDrawer" hidden>
+        <div class="drawer-head">
+          <b>Мои диалоги</b>
+          <button class="btn btn-primary btn-small" id="newChatBtn">Новый диалог</button>
+        </div>
+        <ul class="chat-list" id="chatList"></ul>
       </div>
       <div class="chat-log" id="chatLog" aria-live="polite"></div>
       <form class="composer" id="composer">

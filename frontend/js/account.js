@@ -105,7 +105,8 @@ async function openMenu() {
   let h;
   try { h = await api.history(); } catch (e) { setModalBody(dlg, html`<p class="auth-error">${e.message}</p>`); return; }
   const sessions = h.sessions.map((s) => html`
-    <li><div><b>${s.query}</b><span class="hint">${s.started_at.replace("T", " ")} · ${STATUS[s.status] || s.status}</span></div>
+    <li class="history-open" data-open-chat="${s.id}" data-title="${s.query}" role="button" tabindex="0" title="Открыть и продолжить диалог">
+    <div><b>${s.query}</b><span class="hint">${s.started_at.replace("T", " ")} · ${STATUS[s.status] || s.status}</span></div>
     ${html.raw(s.summary ? html`<p class="hint">${s.summary}</p>` : "")}</li>`).join("");
   const liked = h.liked.map((x) => html`<li><a href="${x.url || "#"}" target="_blank" rel="noopener">${x.address}</a><span class="num">${rub(x.price)}</span></li>`).join("");
   setModalBody(dlg, html`
@@ -116,10 +117,14 @@ async function openMenu() {
       <div><b class="num">${h.calls}</b><span>звонков продавцам</span></div>
       <div><b class="num">${h.events}</b><span>действий в журнале</span></div>
     </div>
-    <h3 class="sub">Поиски</h3>
+    <h3 class="sub">Диалоги — нажмите, чтобы открыть и продолжить</h3>
     ${html.raw(sessions ? html`<ul class="history">${html.raw(sessions)}</ul>` : html`<p class="hint">Пока пусто.</p>`)}
     ${html.raw(liked ? html`<h3 class="sub">Понравились</h3><ul class="history liked">${html.raw(liked)}</ul>` : "")}
     <div class="account-actions"><button class="btn btn-ghost" data-logout>Выйти</button></div>`);
+  dlg.querySelectorAll("[data-open-chat]").forEach((li) => li.addEventListener("click", () => {
+    dlg.close();
+    window.dispatchEvent(new CustomEvent("open-chat", { detail: { id: li.dataset.openChat, title: li.dataset.title } }));
+  }));
   dlg.querySelector("[data-logout]").addEventListener("click", async () => {
     await api.logout();
     me.user = null;

@@ -15,6 +15,7 @@ from datetime import date
 from typing import Any
 
 from .. import economics, sources
+from ..config import settings
 from ..db import repo
 from ..llm import LLMClient, LLMError
 from . import call_analytics as CA
@@ -55,10 +56,26 @@ class Session:
     visitor_id: str | None = None  # cookie посетителя — журнал пишется на него до регистрации
     user_id: int | None = None
     checks: dict[str, dict] = field(default_factory=dict)  # досье безопасности по id объявления (для окна проверки)
+    seq: int = 0                   # номер последнего события диалога (продолжение диалога — с него)
+    history: list = field(default_factory=list)       # события этого запуска — для повторного открытия вкладки
+    subscribers: set = field(default_factory=set)     # открытые вкладки (SSE): каждой — своя очередь
+    base_profile: dict | None = None  # продолжение старого диалога: что агент уже знал о запросе
+    mode: str = "pipeline"         # pipeline — полный сценарий; answer — только ответ на вопрос в старом диалоге
 
     # ------------------------------------------------------------- события
+    def push(self, type_: str, **payload: Any) -> dict:
+        """Событие в ленту диалога: номер, история, база, все открытые вкладки. Синхронно — порядок не путается."""
+        self.seq += 1
+        ev = {"type": type_, **payload, "seq": self.seq}
+        self.history.append(ev)
+        repo.record(repo.save_chat_event, self.id, self.seq, _jsonable_event(ev))
+        self.events.put_nowait(ev)
+        for q in list(self.subscribers):
+            q.put_nowait(ev)
+        return ev
+
     async def emit(self, type_: str, **payload: Any) -> None:
-        await self.events.put({"type": type_, **payload})
+        self.push(type_, **payload)
         if type_ in ("done", "error"):
             status = payload.get("status", "error")
             repo.record(repo.update_agent_session, self.id, status=status, profile=_jsonable(self.profile) or None,
@@ -91,8 +108,11 @@ class Session:
         fut = self.pending.get(kind)
         if not fut or fut.done():
             return False
-        fut.set_result({"approved": approved, "data": data or {}})
-        self.log("confirm", {"kind": kind, "approved": approved, "data": _jsonable(data or {})})
+        data = dict(data or {})
+        label = data.pop("_label", None)
+        self.push("resolved", kind=kind, approved=approved, label=label)  # до продолжения конвейера — порядок важен
+        fut.set_result({"approved": approved, "data": data})
+        self.log("confirm", {"kind": kind, "approved": approved, "data": _jsonable(data)})
         return True
 
     async def receive_text(self, text: str, marks: dict | None = None) -> str:
@@ -130,6 +150,33 @@ def create_session(query: str, llm: LLMClient, visitor_id: str | None = None, us
     SESSIONS[s.id] = s
     repo.record(repo.start_agent_session, s.id, s.query, visitor_id, user_id, llm.name)
     return s
+
+
+def continue_session(chat_id: str, text: str, llm: LLMClient, visitor_id: str | None, user_id: int | None) -> Session:
+    """Продолжить старый диалог: новый запуск агента в той же ленте. Агент помнит, что уже знал о запросе:
+    вопрос («сколько я переплачу?») — просто ответ; иначе — поиск заново с учётом прошлого профиля и нового сообщения."""
+    chat = repo.record(lambda db: (lambda c: c and {"profile": c.profile, "visitor_id": c.visitor_id,
+                                                     "user_id": c.user_id})(repo.get_chat(db, chat_id)))
+    base = (chat or {}).get("profile") or None
+    s = Session(id=chat_id, query=text.strip(), llm=llm, visitor_id=(chat or {}).get("visitor_id") or visitor_id,
+                user_id=user_id or (chat or {}).get("user_id"), base_profile=base)
+    s.seq = repo.record(repo.last_seq, chat_id, default=0) or 0
+    if base:
+        s.profile = dict(base)
+    s.mode = "answer" if base and qa.is_question(text) else "pipeline"
+    SESSIONS[chat_id] = s
+    repo.record(repo.update_agent_session, chat_id, status="running", finished_at=None)
+    return s
+
+
+def _jsonable_event(ev: dict) -> dict:
+    """Событие для ленты диалога: всё, что видел клиент, без обрезки длинных описаний квартир."""
+    import json
+    try:
+        json.dumps(ev, ensure_ascii=False)
+        return ev
+    except (TypeError, ValueError):
+        return _jsonable(ev)
 
 
 def _jsonable(x: Any) -> Any:
@@ -298,7 +345,9 @@ async def pipeline(s: Session) -> None:
 
     # 1. Запрос и уточнения: сначала город и комнаты, потом бюджет — с ценами рынка перед глазами
     await s.step(1, "active")
-    profile = await parse_request(s, s.query)
+    if s.base_profile:
+        await s.say("Продолжаю этот диалог — помню ваш запрос: " + (s.base_profile.get("summary") or "") .rstrip(".") + ".")
+    profile = await parse_request(s, s.query, base=s.base_profile)
     market = None
     fin_inputs = None
     for _ in range(5):
@@ -553,23 +602,25 @@ async def pipeline(s: Session) -> None:
     candidates.sort(key=lambda x: meta[x["id"]]["total"], reverse=True)
     await s.step(4, "done")
 
-    # 5. Проверка
-    await s.step(5, "active")
+    # 5. Проверка безопасности — скрыта (SECURITY_STEP=false): реестры через гос. сайты пока не проверяем.
+    # Досье считаем всё равно — оно идёт в карточку звонка, но шаг и окно проверки клиенту не показываем.
     checks = {x["id"]: T.legal_check(x) for x in candidates}
-    s.checks.update(checks)
-    for x in candidates:
-        repo.record(repo.save_security, x, checks[x["id"]]["checks"] + checks[x["id"]]["before_deal"])
-    await s.emit("result", step=5, kind="legal", data={"checks": list(checks.values()),
-                                                         "listings": [card(x, meta) for x in candidates]})
-    warned = [x for x in candidates if checks[x["id"]]["status"] == "warn"]
-    totals = sorted({c["total"] for c in checks.values()}) or [0]
-    total = totals[-1]
-    total_txt = f"{totals[0]}–{totals[-1]}" if len(totals) > 1 else str(total)
-    await s.say(f"Проверил {len(candidates)} {T.plural(len(candidates), 'объект', 'объекта', 'объектов')} по данным объявлений"
-                + (f"; есть оговорки у {len(warned)} — отметил, что проверить в первую очередь." if warned else "; тревожных признаков не видно.")
-                + f" До сделки закажу {total_txt} {T.plural(total, 'проверку', 'проверки', 'проверок')} по реестрам на объект — "
-                  "пока выписок нет, «чисто» не пишу.")
-    await s.step(5, "done")
+    if settings.security_step:
+        await s.step(5, "active")
+        s.checks.update(checks)
+        for x in candidates:
+            repo.record(repo.save_security, x, checks[x["id"]]["checks"] + checks[x["id"]]["before_deal"])
+        await s.emit("result", step=5, kind="legal", data={"checks": list(checks.values()),
+                                                             "listings": [card(x, meta) for x in candidates]})
+        warned = [x for x in candidates if checks[x["id"]]["status"] == "warn"]
+        totals = sorted({c["total"] for c in checks.values()}) or [0]
+        total = totals[-1]
+        total_txt = f"{totals[0]}–{totals[-1]}" if len(totals) > 1 else str(total)
+        await s.say(f"Проверил {len(candidates)} {T.plural(len(candidates), 'объект', 'объекта', 'объектов')} по данным объявлений"
+                    + (f"; есть оговорки у {len(warned)} — отметил, что проверить в первую очередь." if warned else "; тревожных признаков не видно.")
+                    + f" До сделки закажу {total_txt} {T.plural(total, 'проверку', 'проверки', 'проверок')} по реестрам на объект — "
+                      "пока выписок нет, «чисто» не пишу.")
+        await s.step(5, "done")
 
     # 6–9 по кандидатам (если цена не устроила — следующий)
     called = 0
@@ -608,7 +659,7 @@ async def pipeline(s: Session) -> None:
         end = None
         human = (lambda: N.queue_input(s.seller_queue)) if mode == "human" else None
         async for ev in N.run(s.llm, neg, human_input=human):
-            await s.events.put(ev)
+            s.push(ev["type"], **{k: v for k, v in ev.items() if k != "type"})
             if ev["type"] == "call_end":
                 end = ev
         if neg.used_fallback:
@@ -713,7 +764,22 @@ async def pipeline(s: Session) -> None:
     await s.emit("done", status="exhausted")
 
 
+async def answer_only(s: Session) -> None:
+    """Вопрос в завершённом диалоге: ответить с числами этого диалога и ждать следующего сообщения."""
+    await s.emit("message", role="user", text=s.query)
+    await qa.answer(s, s.query)
+    await s.emit("idle")
+    repo.record(repo.update_agent_session, s.id, status="answered")
+
+
 async def run_session(s: Session) -> None:
+    if s.mode == "answer":
+        try:
+            await answer_only(s)
+        except Exception as exc:
+            log.exception("answer failed")
+            await s.emit("error", text=f"Ошибка агента: {exc}")
+        return
     try:
         await pipeline(s)
     except asyncio.CancelledError:

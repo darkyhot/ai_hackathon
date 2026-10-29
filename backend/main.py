@@ -84,6 +84,7 @@ async def health():
         "reason": getattr(llm, "reason", None),
         "cities": sources.SUPPORTED_CITIES,
         "featured_cities": sources.FEATURED_CITIES,
+        "features": {"security_step": settings.security_step, "chat_history": True},
         "demo": settings.demo,
         "stt": stt.status(),
         "db": repo.record(lambda d: d.bind.dialect.name, default=None),
@@ -174,43 +175,117 @@ async def start(req: StartRequest, request: Request):
     return {"id": s.id}
 
 
+def _owns(obj, vid: str | None, uid: int | None) -> bool:
+    """Диалог — тому браузеру, где начат, и пользователю, к которому привязан после входа."""
+    return bool(obj and ((vid and obj.visitor_id == vid) or (uid is not None and obj.user_id == uid)
+                         or (not obj.visitor_id and obj.user_id is None)))
+
+
 def _session(sid: str, request: Request) -> O.Session:
-    """Сессия агента — только тому браузеру, который её создал (cookie vid). Чужой id — как несуществующий."""
+    """Живая сессия агента — только своему браузеру или пользователю. Чужой id — как несуществующий."""
     s = O.SESSIONS.get(sid)
-    if not s or (s.visitor_id and auth.visitor_id(request) != s.visitor_id):
+    vid, uid, _ = auth.whoami(request)
+    if not s or not _owns(s, vid, uid):
         raise HTTPException(404, "Сессия не найдена")
     return s
 
 
-@app.get("/api/session/{sid}/stream")
-async def stream(sid: str, request: Request):
-    s = _session(sid, request)
-    if s.task is not None:
-        raise HTTPException(409, "Сессия уже запущена")
-    s.task = asyncio.create_task(O.run_session(s))
+def _chat_access(sid: str, request: Request) -> tuple[O.Session | None, bool]:
+    """(живая сессия или None, есть ли доступ к диалогу)."""
+    vid, uid, _ = auth.whoami(request)
+    live = O.SESSIONS.get(sid)
+    if live is not None:
+        return live, _owns(live, vid, uid)
+    ok = repo.record(lambda d: repo.can_open_chat(repo.get_chat(d, sid), vid, uid), default=False)
+    return None, bool(ok)
+
+
+def _sse(ev: dict) -> str:
+    return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+
+def _running(s: O.Session | None) -> bool:
+    return s is not None and not (s.task is not None and s.task.done())
+
+
+@app.get("/api/chat/{sid}/stream")
+async def chat_stream(sid: str, request: Request, after: int = 0):
+    """Лента диалога: сначала всё, что было после события after (replay: true), затем живые события.
+    Закрытая вкладка не останавливает агента: диалог можно открыть снова и продолжить."""
+    live, ok = _chat_access(sid, request)
+    if not ok:
+        raise HTTPException(404, "Диалог не найден")
+    if live is not None and live.task is None:
+        live.task = asyncio.create_task(O.run_session(live))
 
     async def gen():
+        q: asyncio.Queue = asyncio.Queue()
+        if live is not None:
+            live.subscribers.add(q)  # сначала подписка, потом история — ни одно событие не потеряется
         try:
+            past = repo.record(repo.chat_events, sid, after, default=None)
+            if past is None and live is not None:  # база недоступна — берём из памяти
+                past = [e for e in live.history if e["seq"] > after]
+            sent = after
+            for ev in past or []:
+                yield _sse({**ev, "replay": True})
+                sent = max(sent, ev.get("seq", sent))
+            running = _running(live)
+            title = repo.record(lambda d: (lambda c: c and (c.title or c.query[:80]))(repo.get_chat(d, sid)))
+            yield _sse({"type": "replay_end", "live": running, "seq": sent, "title": title})
+            if not running:
+                return
             while True:
                 try:
-                    ev = await asyncio.wait_for(s.events.get(), timeout=15)
+                    ev = await asyncio.wait_for(q.get(), timeout=15)
                 except asyncio.TimeoutError:
                     if await request.is_disconnected():
                         break
                     yield ": ping\n\n"
                     continue
-                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
-                if ev["type"] in {"done", "error"}:
+                if ev.get("seq", 0) <= sent:
+                    continue
+                sent = ev["seq"]
+                yield _sse(ev)
+                if ev["type"] in {"done", "error", "idle"}:
                     break
         finally:
-            if not s.task.done():
-                s.task.cancel()
+            if live is not None:
+                live.subscribers.discard(q)
 
-    return StreamingResponse(
-        gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/session/{sid}/stream")
+async def stream(sid: str, request: Request):
+    """Старый адрес ленты (до истории диалогов) — то же, что /api/chat/{sid}/stream."""
+    return await chat_stream(sid, request, 0)
+
+
+@app.get("/api/chats")
+async def chats(request: Request):
+    """Список диалогов этого браузера и пользователя — как в чат-ботах: новые сверху."""
+    vid, uid, _ = auth.whoami(request)
+    items = repo.record(repo.chat_list, uid, vid, default=[]) or []
+    for c in items:
+        c["live"] = _running(O.SESSIONS.get(c["id"]))
+    return {"chats": items}
+
+
+@app.post("/api/chat/{sid}/message")
+async def chat_message(sid: str, req: ClientMessage, request: Request):
+    """Сообщение в диалог. Агент работает — как обычно; диалог завершён или сервер перезапускался —
+    продолжаем его: вопрос — ответ, иначе — новый поиск с тем, что агент уже знал."""
+    live, ok = _chat_access(sid, request)
+    if not ok:
+        raise HTTPException(404, "Диалог не найден")
+    if _running(live) and live.task is not None:
+        kind = await live.receive_text(req.text.strip(), {"liked": req.liked, "disliked": req.disliked})
+        return {"ok": True, "handled_as": kind, "continued": False}
+    vid, uid, _ = auth.whoami(request)
+    s = O.continue_session(sid, req.text, get_llm(), vid, uid)
+    return {"ok": True, "handled_as": s.mode, "continued": True, "after": s.seq}
 
 
 @app.post("/api/session/{sid}/confirm")

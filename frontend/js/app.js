@@ -21,11 +21,13 @@ let gen = 0; // поколение сессии: события старой с�
 let queue = [];
 let pumping = false;
 let cities = [];
+let features = { security_step: false };
 
 function freshState() {
   return {
     sid: null, es: null, running: false, streamEnded: false, results: {}, status: Array(10).fill("idle"), view: 0,
     call: null, marks: { liked: new Set(), disliked: new Set() }, opened: {}, strategy: null, awaiting: null,
+    lastSeq: 0, replaying: false,
   };
 }
 
@@ -39,6 +41,7 @@ function addMsg(role, text) {
 }
 
 function settle(card, label) {
+  if (card.classList.contains("is-done")) return;
   card.classList.add("is-done");
   card.append(el(html`<div class="verdict">Решение: ${label}</div>`));
 }
@@ -46,7 +49,7 @@ function settle(card, label) {
 async function decide(card, kind, approved, data, label) {
   card.querySelectorAll("button, input, select").forEach((x) => (x.disabled = true));
   try {
-    await api.confirm(state.sid, kind, approved, data);
+    await api.confirm(state.sid, kind, approved, { ...data, _label: label });
     settle(card, label);
     if (kind === "call" && approved && state.call) state.call.mode = data.mode;
   } catch (e) {
@@ -189,11 +192,14 @@ function confirmCard(ev) {
 // ------------------------------------------------------------------ степпер и сцена
 
 function renderStepper() {
+  let shown = 0;
   stepper.innerHTML = STEPS.map((t, i) => {
     const n = i + 1;
+    if (n === 5 && !features.security_step) return ""; // шаг «Проверка» скрыт (SECURITY_STEP=false)
+    shown += 1;
     const st = state.status[n];
     const cls = [st === "active" ? "is-active" : "", st === "done" ? "is-done" : "", state.view === n ? "is-viewing" : ""].join(" ");
-    const dot = st === "done" ? "✓" : n;
+    const dot = st === "done" ? "✓" : shown;
     return html`<li class="${cls}"><button data-step="${n}" ${st === "idle" ? "disabled" : ""} aria-current="${state.view === n ? "step" : "false"}"><span class="dot">${dot}</span>${t}</button></li>`;
   }).join("");
 }
@@ -236,20 +242,46 @@ function show(n) {
 
 async function handle(ev, myGen) {
   const call = state.call;
+  const pause = (ms) => (ev.replay ? null : sleep(ms)); // историю диалога показываем сразу, без пауз и голоса
+  if (ev.seq) state.lastSeq = Math.max(state.lastSeq, ev.seq);
   switch (ev.type) {
-    case "provider": setProvider(ev); break;
-    case "message": addMsg(ev.role, ev.text); await sleep(ev.role === "agent" ? 300 : 0); break;
+    case "provider": if (!ev.replay) setProvider(ev); break;
+    case "message": addMsg(ev.role, ev.text); await pause(ev.role === "agent" ? 300 : 0); break;
     case "step":
       state.status[ev.step] = ev.status === "pending" ? "active" : ev.status;
-      if (ev.status === "active") show(ev.step); else renderStepper();
-      await sleep(150);
+      if (ev.status === "active" && !ev.replay) show(ev.step); else renderStepper();
+      await pause(150);
       break;
     case "result":
       state.results[ev.step] = ev.data;
       if (ev.kind === "finance") state.strategy = ev.data.finance?.risk || null;
+      if (ev.kind === "selection") state.marks = { liked: new Set(ev.data.liked || []), disliked: new Set(ev.data.disliked || []) };
       state.view = ev.step;
+      if (!ev.replay) renderStage();
+      await pause(ev.kind === "selection" ? 0 : 500);
+      break;
+    case "resolved": {
+      const open = [...chatLog.querySelectorAll(`.confirm-${ev.kind}:not(.is-done)`)].pop();
+      if (open) settle(open, ev.label || (ev.approved ? "принято" : "отклонено"));
+      if (ev.kind === "selection" || state.awaiting === ev.kind) state.awaiting = null;
+      break;
+    }
+    case "replay_end":
+      state.replaying = false;
+      state.running = ev.live;
+      if (ev.title) state.title = ev.title;
+      if (!ev.live) { state.streamEnded = true; state.es?.close(); }
       renderStage();
-      await sleep(ev.kind === "selection" ? 0 : 500);
+      setComposer();
+      chatLog.scrollTop = chatLog.scrollHeight;
+      break;
+    case "idle":
+      state.running = false;
+      if (ev.replay) break; // в истории за ответом могли идти продолжения — ленту не закрываем
+      state.streamEnded = true;
+      state.es?.close();
+      setComposer();
+      refreshChats();
       break;
     case "confirm":
       if (ev.kind === "call") {
@@ -280,6 +312,7 @@ async function handle(ev, myGen) {
       const node = addLine(call, ev);
       updatePrices(call);
       node?.classList.add("is-speaking");
+      if (ev.replay) { node?.classList.remove("is-speaking"); break; }
       const t0 = performance.now();
       await voice.speak(ev.text, ev.speaker);
       if (!voice.enabled) await sleep(Math.min(3000, 800 + ev.text.length * 16));
@@ -308,8 +341,8 @@ async function handle(ev, myGen) {
     case "call_facts":
       if (call) showFacts(call, ev.facts, ev.summary);
       break;
-    case "done": finish(ev.status); break;
-    case "error": addMsg("error", ev.text); finish("error"); break;
+    case "done": finish(ev.status, ev.replay); break;
+    case "error": addMsg("error", ev.text); finish("error", ev.replay); break;
   }
 }
 
@@ -333,9 +366,9 @@ async function submitSeller(text) {
   try { await api.seller(state.sid, text); } catch (e) { addMsg("error", `Ответ продавца не отправлен: ${e.message}`); }
 }
 
-function finish(status) {
+function finish(status, replay = false) {
   state.running = false;
-  state.es?.close();
+  if (!replay) { state.es?.close(); refreshChats(); } // в истории диалога за «готово» могут идти продолжения
   setComposer();
   const notes = {
     completed: "Сделка завершена. Можно начать новый запрос.",
@@ -351,51 +384,102 @@ function finish(status) {
 // ------------------------------------------------------------------ запуск и сообщения
 
 function setComposer() {
-  $("sendBtn").textContent = state.running ? "Отправить" : "Поручить агенту";
-  $("query").placeholder = state.running ? "Ответ, пожелание или вопрос: «кухня побольше», «что такое СБР?»…" : "Например: ищу 2-комнатную в Казани до 9 млн рядом со школой";
+  const resume = !state.running && state.sid;
+  $("sendBtn").textContent = state.running ? "Отправить" : resume ? "Продолжить диалог" : "Поручить агенту";
+  $("query").placeholder = state.running ? "Ответ, пожелание или вопрос: «кухня побольше», «что такое СБР?»…"
+    : resume ? "Продолжите: «а если трёшку?», «сколько я переплачу?», «ищи в Москве»…"
+    : "Например: ищу 2-комнатную в Казани до 9 млн рядом со школой";
   $("resetBtn").hidden = !state.sid;
+  $("chatTitle").textContent = state.title || "Новый диалог";
 }
 
-async function start(query) {
-  if (!query.trim()) return;
+function clearScreen() {
   state.es?.close();
   voice.stop();
   gen += 1;
   queue = [];
   state = freshState();
   chatLog.innerHTML = "";
+}
+
+function openStream(id, after) {
+  const myGen = gen;
+  const es = api.stream(id, after);
+  state.es = es;
+  state.streamEnded = false;
+  es.onmessage = (m) => {
+    if (gen !== myGen) return;
+    const ev = JSON.parse(m.data);
+    if (!ev.replay && ["done", "error", "idle"].includes(ev.type)) state.streamEnded = true;
+    enqueue(ev);
+  };
+  es.onerror = () => {
+    es.close();
+    if (gen === myGen && state.running && !state.streamEnded && !state.replaying) {
+      addMsg("error", "Связь с агентом прервалась. Откройте диалог снова из списка — он сохранён.");
+      finish("error");
+    }
+  };
+}
+
+function setChatHash(id) {
+  try { history.replaceState(null, "", id ? `#chat-${id}` : location.pathname); } catch { /* превью без истории */ }
+}
+
+async function start(query) {
+  if (!query.trim()) return;
+  clearScreen();
   $("query").value = "";
   renderStage();
   try {
     const { id } = await api.start(query);
     state.sid = id;
+    state.title = query.trim().slice(0, 80);
     state.running = true;
     setComposer();
-    const myGen = gen;
-    const es = api.stream(id);
-    state.es = es;
-    es.onmessage = (m) => {
-      if (gen !== myGen) return;
-      const ev = JSON.parse(m.data);
-      if (ev.type === "done" || ev.type === "error") state.streamEnded = true;
-      enqueue(ev);
-    };
-    es.onerror = () => {
-      es.close();
-      if (gen === myGen && state.running && !state.streamEnded) {
-        addMsg("error", "Связь с агентом прервалась. Отправьте запрос ещё раз.");
-        finish("error");
-      }
-    };
+    setChatHash(id);
+    openStream(id, 0);
+    setTimeout(refreshChats, 800);
   } catch (e) {
     addMsg("error", `Агент не запустился: ${e.message}`);
+  }
+}
+
+async function openChat(id, title) {
+  closeDrawer();
+  if (state.sid === id && (state.running || state.replaying)) return;
+  clearScreen();
+  state.sid = id;
+  state.title = title || "Диалог";
+  state.replaying = true;
+  setChatHash(id);
+  setComposer();
+  renderStage();
+  openStream(id, 0);
+}
+
+async function continueChat(text) {
+  $("query").value = "";
+  try {
+    const r = await api.chatMessage(state.sid, text);
+    if (!r.continued) return;
+    state.running = true;
+    state.results = {}; // новый запуск в том же диалоге: этапы заполнятся заново
+    state.status = Array(10).fill("idle");
+    state.call = null;
+    state.view = 1;
+    setComposer();
+    renderStage();
+    openStream(state.sid, r.after);
+  } catch (e) {
+    addMsg("error", `Сообщение не отправлено: ${e.message}`);
   }
 }
 
 async function sendText(text) {
   text = text.trim();
   if (!text) return;
-  if (!state.running) return start(text);
+  if (!state.running) return state.sid ? continueChat(text) : start(text);
   $("query").value = "";
   const marks = { liked: [...state.marks.liked], disliked: [...state.marks.disliked] };
   try {
@@ -445,17 +529,59 @@ $("query").addEventListener("keydown", (e) => {
     $("composer").requestSubmit();
   }
 });
-$("resetBtn").addEventListener("click", () => {
-  state.es?.close();
-  voice.stop();
-  gen += 1;
-  queue = [];
-  state = freshState();
-  chatLog.innerHTML = "";
-  addMsg("agent", "Начнём заново. Опишите, какую квартиру ищете.");
+function newChat() {
+  closeDrawer();
+  clearScreen();
+  setChatHash(null);
+  addMsg("agent", "Начнём новый диалог. Опишите, какую квартиру ищете.");
   setComposer();
   renderStage();
+}
+$("resetBtn").addEventListener("click", newChat);
+
+// ------------------------------------------------------------------ список диалогов
+
+const STATUS_LABEL = { completed: "сделка", cancelled: "остановлен", saving: "копим на взнос", empty: "ничего не нашлось",
+  paused: "пауза", exhausted: "варианты кончились", running: "идёт", answered: "ответ дан", error: "ошибка" };
+
+function ago(iso) {
+  const d = new Date(iso);
+  const today = new Date();
+  return d.toDateString() === today.toDateString()
+    ? d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
+}
+
+async function refreshChats() {
+  const list = $("chatList");
+  let items = [];
+  try { items = (await api.chats()).chats; } catch { return; }
+  list.innerHTML = items.length ? items.map((c) => html`
+    <li><button class="chat-item ${c.id === state.sid ? "is-on" : ""}" data-chat="${c.id}" data-title="${c.title}">
+      <span class="chat-item-title">${c.title}</span>
+      <span class="chat-item-meta">${ago(c.updated_at)} · ${c.live ? "агент работает" : STATUS_LABEL[c.status] || c.status}</span>
+    </button></li>`).join("")
+    : html`<li class="chat-empty">Здесь появятся ваши диалоги с агентом. После входа они доступны с любого устройства.</li>`;
+}
+
+function closeDrawer() {
+  $("chatDrawer").hidden = true;
+  $("chatsBtn").setAttribute("aria-expanded", "false");
+}
+
+$("chatsBtn").addEventListener("click", () => {
+  const open = $("chatDrawer").hidden;
+  $("chatDrawer").hidden = !open;
+  $("chatsBtn").setAttribute("aria-expanded", String(open));
+  if (open) refreshChats();
 });
+$("newChatBtn").addEventListener("click", newChat);
+$("chatList").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-chat]");
+  if (b) openChat(b.dataset.chat, b.dataset.title);
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("chatDrawer").hidden) closeDrawer(); });
+window.addEventListener("open-chat", (e) => openChat(e.detail.id, e.detail.title));
 
 bindMic($("micBtn"), $("query"), {
   onFinal: (text) => sendText(text),
@@ -535,12 +661,15 @@ document.querySelectorAll(".tab").forEach((tab) =>
   }),
 );
 
-addMsg("agent", "Здравствуйте! Я агент покупки квартиры. Расскажите текстом или голосом, что ищете: город, бюджет, комнаты и что для вас важно.");
+const fromHash = (location.hash.match(/^#chat-([0-9a-f]{6,32})$/) || [])[1];
+if (fromHash) openChat(fromHash);
+else addMsg("agent", "Здравствуйте! Я агент покупки квартиры. Расскажите текстом или голосом, что ищете: город, бюджет, комнаты и что для вас важно.");
 setComposer();
 renderStage();
 initAccount();
 
 api.health().then((h) => {
+  features = { security_step: Boolean(h.features?.security_step) };
   cities = [...(h.featured_cities || []), ...(h.cities || []).filter((c) => !(h.featured_cities || []).includes(c))];
   recorder.available = Boolean(h.stt?.installed && h.stt.status !== "error");
   setProvider(h);

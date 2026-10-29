@@ -27,6 +27,8 @@ class Settings:
     llm_fallback_to_mock: bool = _bool("LLM_FALLBACK_TO_MOCK", True)
     # Демо-режим: объявления — из сохранённого среза Циана в репозитории (backend/data/demo), без сети
     demo: bool = _bool("DEMO", False)
+    # Шаг «Проверка безопасности» (реестры через гос. сайты). Пока скрыт: включить — SECURITY_STEP=true
+    security_step: bool = _bool("SECURITY_STEP", False)
     # Площадки объявлений через запятую. Сейчас подключён только Циан; новые площадки — модули в backend/sources
     sources: str = os.getenv("SOURCES", "cian")
 

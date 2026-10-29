@@ -1,7 +1,7 @@
 """Схема базы. Диаграмма и пояснения — docs/ERD.md.
 
 Группы таблиц:
-  люди и журнал      users, visitors, auth_sessions, events, agent_sessions, finance_profiles
+  люди и журнал      users, visitors, auth_sessions, events, agent_sessions, chat_events, finance_profiles
   квартиры           listings, listing_photos, listing_price_history, complexes, developers
   признаки квартир   features (каталог), listing_features (значения: «квартира → признак → значение»)
   обход площадок     tracked_searches, crawl_runs
@@ -89,6 +89,22 @@ class AgentSession(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     result: Mapped[dict | None] = mapped_column(JSON)  # итог: объект, цена, экономия
+    title: Mapped[str | None] = mapped_column(String(120))  # название диалога в списке (первый запрос)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime)  # последнее событие — для сортировки списка
+
+
+class ChatEvent(Base):
+    """Всё, что видел клиент в диалоге (сообщения, карточки, шаги, звонок) — по порядку.
+    По этой ленте диалог открывается заново и продолжается, как в чат-ботах."""
+    __tablename__ = "chat_events"
+    __table_args__ = (UniqueConstraint("agent_session_id", "seq"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    agent_session_id: Mapped[str] = mapped_column(ForeignKey("agent_sessions.id", ondelete="CASCADE"), index=True)
+    seq: Mapped[int] = mapped_column(Integer)  # номер события в диалоге: 1, 2, 3…
+    type: Mapped[str] = mapped_column(String(30))
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class Event(Base):
