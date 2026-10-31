@@ -14,7 +14,7 @@ import uuid
 
 from .. import geo
 from ..llm import LLMError
-from . import actions, prompts
+from . import actions, guard, prompts
 from .features import FEATURES
 from .numbers import fmt
 from .profile import missing_required
@@ -57,7 +57,9 @@ def state_brief(s) -> str:
 
 
 async def think(s, with_actions: bool):
-    messages = [{"role": "system", "content": prompts.AGENT_SYSTEM.replace("{state}", state_brief(s))}, *s.messages]
+    # в состоянии сделки — пожелания клиента и адреса с Циана: чужой текст, чистим от команд модели
+    state = guard.sanitize(state_brief(s))
+    messages = [{"role": "system", "content": prompts.AGENT_SYSTEM.replace("{state}", state)}, *s.messages]
     return await s.llm.chat(messages, tools=actions.tools() if with_actions else None, temperature=0.3, max_tokens=900,
                             tag="agent")
 
@@ -67,7 +69,11 @@ async def run(s) -> None:
     s.push("provider", provider=s.llm.name, model=s.llm.model, degraded=False)
     if s.query:
         s.push("message", role="user", text=s.query)
-        s.messages.append({"role": "user", "content": s.query})
+        if s.refuse(s.query):  # первый же запрос — инъекция: модель его не видит, ждём нормального сообщения
+            s.remember()
+            s.messages.append({"role": "user", "content": await s.inbox.get()})
+        else:
+            s.messages.append({"role": "user", "content": s.query})
     in_row = 0
     while True:
         s.signal("typing", on=True)
@@ -90,22 +96,33 @@ async def run(s) -> None:
                 for c in calls]})
             s.remember()  # до действий: если сервер упадёт, пока карточка ждёт клиента, вызов не потеряется
             if resp.text.strip():
-                await s.say(resp.text.strip())
+                await s.say(_safe_reply(s, resp.text.strip()))
             s.signal("typing", on=False)
             for call in calls:
                 log.info("агент %s: %s(%s)", s.id, call.name, json.dumps(call.arguments, ensure_ascii=False)[:200])
                 result = await actions.execute(s, call)
-                s.messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(result, ensure_ascii=False, default=str)})
+                # результат действия может нести чужой текст (описание объявления, слова продавца) — без команд модели
+                s.messages.append({"role": "tool", "tool_call_id": call.id,
+                                   "content": json.dumps(guard.sanitize(result), ensure_ascii=False, default=str)})
             s.remember()
             continue
         in_row = 0
         s.signal("typing", on=False)
         text = resp.text.strip()
         if text:
+            text = _safe_reply(s, text)
             await s.say(text)
             s.messages.append({"role": "assistant", "content": text})
         s.remember()
         s.messages.append({"role": "user", "content": await s.inbox.get()})
+
+
+def _safe_reply(s, text: str) -> str:
+    """Ответ модели — через фильтр выхода: без кусков системного промпта, ключей и многократных повторов."""
+    safe, category = guard.check_output(text)
+    if category:
+        guard.note(s, "output", category, text)
+    return safe
 
 
 async def run_session(s) -> None:

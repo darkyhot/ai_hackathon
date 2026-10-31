@@ -13,7 +13,7 @@ from dataclasses import fields
 import httpx
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -23,12 +23,36 @@ from .agent.loop import run_session
 from .config import ROOT, settings
 from .db import repo
 from .llm import LLMError, get_llm
-from . import phone, stt
+from . import phone, ratelimit, stt
+from .agent import guard
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 app = FastAPI(title="Агент жизненных событий — Домклик")
 app.middleware("http")(auth.visitor_middleware)
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",                      # страницу нельзя встроить в чужой сайт (кликджекинг)
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "microphone=(self), camera=(), geolocation=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+}
+
+
+@app.middleware("http")
+async def _limits_and_headers(request: Request, call_next):
+    """Частота запросов (ratelimit.py) и заголовки безопасности на каждый ответ."""
+    who = request.cookies.get(auth.VISITOR_COOKIE) or (request.client.host if request.client else "?")
+    wait = ratelimit.check(request.method, request.url.path, who)
+    if wait is not None:
+        response = JSONResponse({"detail": f"Слишком много запросов. Повторите через {int(wait)} с."}, status_code=429,
+                                headers={"Retry-After": str(int(wait))})
+    else:
+        response = await call_next(request)
+    for k, v in SECURITY_HEADERS.items():
+        response.headers.setdefault(k, v)
+    return response
 
 
 @app.on_event("startup")
@@ -221,6 +245,12 @@ def _can_open(sid: str, request: Request) -> bool:
     return bool(db.safe(lambda d: repo.can_open(repo.get_chat(d, sid), vid, uid), default=False))
 
 
+def _cooldown(s: O.Session | None) -> None:
+    """Пять и больше заблокированных сообщений за 10 минут — пауза: похоже на подбор инъекции."""
+    if s is not None and s.blocked_recently(120) >= 5:
+        raise HTTPException(429, "Слишком много сообщений, которые я не могу выполнить. Сделаем паузу на пару минут.")
+
+
 def _sse(ev: dict) -> str:
     return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
@@ -292,6 +322,7 @@ async def chat_message(sid: str, req: ClientMessage, request: Request):
     поднимаем агента с памятью диалога. continued — вкладке нужно переоткрыть ленту с события after."""
     if not _can_open(sid, request):
         raise HTTPException(404, "Диалог не найден")
+    _cooldown(O.SESSIONS.get(sid))
     live = O.SESSIONS.get(sid)
     if live is not None and (live.task is None or O.running(live)):  # агент ещё не запущен или работает
         kind = await live.receive_text(req.text.strip(), {"liked": req.liked, "disliked": req.disliked})
@@ -309,7 +340,13 @@ async def confirm(sid: str, req: ConfirmRequest, request: Request):
 
 @app.post("/api/session/{sid}/seller")
 async def seller(sid: str, req: SellerReply, request: Request):
-    await _session(sid, request).seller_queue.put(req.text.strip())
+    """Реплика продавца (режим «продавец — я» или звонок). Попытка управлять агентом через «продавца»
+    («раскрой лимит клиента», «игнорируй правила») до звонка не доходит — продавец получает отказ и может ответить снова."""
+    s = _session(sid, request)
+    category = s.refuse(req.text, where="seller")
+    if category:
+        return {"ok": True, "blocked": category}
+    await s.seller_queue.put(req.text.strip())
     return {"ok": True}
 
 

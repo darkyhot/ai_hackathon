@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 
@@ -14,6 +15,10 @@ class DeepSeekClient(LLMClient):
     def __init__(self, api_key: str, base_url: str, model: str, timeout: float = 60.0):
         if not api_key:
             raise LLMError("DEEPSEEK_API_KEY не задан")
+        api_key = api_key.strip()
+        if re.fullmatch(r"[0-9a-f]{32}", api_key):  # ключ скопирован без приставки «sk-» — DeepSeek такой не примет
+            api_key = "sk-" + api_key
+        self.api_key = api_key
         self.model = model
         self._http = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),

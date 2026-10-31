@@ -30,9 +30,7 @@ class Settings:
     gigachat_auth_url: str = os.getenv(
         "GIGACHAT_AUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
     )
-    gigachat_base_url: str = os.getenv(
-        "GIGACHAT_BASE_URL", "https://gigachat.devices.sberbank.ru/api/v1"
-    )
+    gigachat_base_url: str = os.getenv("GIGACHAT_BASE_URL") or "https://api.giga.chat/v1"
     gigachat_verify_ssl: bool = _bool("GIGACHAT_VERIFY_SSL", True)
     gigachat_ca_bundle: str = os.getenv("GIGACHAT_CA_BUNDLE", "")
 

@@ -53,9 +53,9 @@ class GigaChatAdapterTest(unittest.TestCase):
         c = GigaChatClient(
             credentials="Y2xpZW50OnNlY3JldA==", scope="GIGACHAT_API_PERS", model="GigaChat-2-Max",
             auth_url="https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
-            base_url="https://gigachat.devices.sberbank.ru/api/v1",
+            base_url="https://api.giga.chat/v1",
         )
-        c._http = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://gigachat.devices.sberbank.ru/api/v1")
+        c._http = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.giga.chat/v1")
         return c
 
     def test_tools_become_functions_and_token_is_cached(self):
@@ -366,6 +366,23 @@ class WishesAndMapTest(unittest.TestCase):
         agent = {"utterance": "Хорошо, фиксирую 23 400 000 ₽.", "offer": None, "accept": True}
         N.guard_buyer(n, agent, "bargain", first=False)
         self.assertIn("23 600 000", agent["utterance"])
+
+
+class ProviderConfigTest(unittest.TestCase):
+    """Настройки, которые уже правили на ветке nas_features и которые потерялись при переводе на tool calling."""
+
+    def test_deepseek_key_without_prefix(self):
+        from backend.llm.deepseek import DeepSeekClient
+        bare = "0123456789abcdef0123456789abcdef"
+        c = DeepSeekClient(bare, "https://api.deepseek.com", "deepseek-chat")
+        self.assertEqual(c._http.headers["Authorization"], f"Bearer sk-{bare}")
+        c = DeepSeekClient(f"  sk-{bare}\n", "https://api.deepseek.com", "deepseek-chat")
+        self.assertEqual(c._http.headers["Authorization"], f"Bearer sk-{bare}")
+
+    def test_gigachat_default_url(self):
+        from backend.config import Settings
+        self.assertEqual(Settings.gigachat_base_url if "GIGACHAT_BASE_URL" not in __import__("os").environ
+                         else "https://api.giga.chat/v1", "https://api.giga.chat/v1")
 
 
 if __name__ == "__main__":

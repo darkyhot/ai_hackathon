@@ -10,7 +10,7 @@ import logging
 import re
 
 from ..llm import LLMError
-from . import prompts
+from . import guard, prompts
 from .numbers import fmt
 
 log = logging.getLogger(__name__)
@@ -65,6 +65,9 @@ async def answer(s, text: str) -> None:
         reply = resp.text.strip()
         if not reply:
             raise LLMError("пустой ответ")
+        reply, leak = guard.check_output(reply)
+        if leak:
+            guard.note(s, "output", leak, resp.text)
     except LLMError as exc:
         log.info("вопрос без ответа: %s", exc)
         reply = "Сейчас не могу ответить на вопрос: модель недоступна. Продолжаю работу — спросите чуть позже."

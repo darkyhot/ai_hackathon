@@ -19,7 +19,7 @@ from datetime import date
 from typing import AsyncIterator, Awaitable, Callable
 
 from ..llm import LLMClient, LLMError
-from . import prompts
+from . import guard, prompts
 from .features import FEATURES, feature_status
 from .numbers import fmt, parse_money, parse_price_near
 from .pricing import bargaining_arguments
@@ -326,6 +326,7 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
             move = await llm_buyer(llm, n, round_no, phase)
             return move, guard_buyer(n, move, phase, first=not n.history)
         move, notes = await _model(step, "реплика ассистента")
+        move["utterance"] = guard.check_output(move["utterance"])[0]
         if move["offer"] is not None:
             n.offer = move["offer"]
         n.history.append({"speaker": "agent", "text": move["utterance"], "offer": move["offer"]})

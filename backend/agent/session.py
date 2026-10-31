@@ -19,7 +19,7 @@ from ..db import repo
 from ..llm import LLMClient
 from . import finance as F
 from . import preferences as P
-from . import qa
+from . import guard, qa
 from .numbers import fmt
 
 STEPS = ["Запрос", "Финансы", "Поиск", "Подбор", "Проверка", "Звонок", "Просмотр", "Сделка", "Итог"]
@@ -65,6 +65,24 @@ class Session:
     opened: dict[str, int] = field(default_factory=dict)
     map_warned: bool = False
     stage: str | None = None
+    blocked: list = field(default_factory=list)  # время заблокированных сообщений (guard): много подряд — пауза
+
+    def blocked_recently(self, window: float = 600) -> int:
+        now = time.monotonic()
+        self.blocked = [t for t in self.blocked if now - t < window]
+        return len(self.blocked)
+
+    def refuse(self, text: str, where: str = "input") -> str | None:
+        """Сообщение клиента нельзя передавать модели (guard.check_input) — вежливый отказ вместо ответа модели.
+        Возвращает категорию или None, если сообщение безопасно."""
+        verdict = guard.check_input(text)
+        if verdict.ok:
+            return None
+        self.blocked.append(time.monotonic())
+        guard.note(self, where, verdict.category, text)
+        self.push("security", category=verdict.category)  # в ленту (интерфейс не показывает) — для аудита диалога
+        self.push("message", role="agent", text=verdict.reply)
+        return verdict.category
 
     # ------------------------------------------------------------- лента событий
     def push(self, type_: str, **payload: Any) -> dict:
@@ -135,6 +153,8 @@ class Session:
         """Сообщение клиента. Ждёт карточка — вопрос («что такое СБР?») получает ответ сбоку, а другой текст
         закрывает карточку (агент сам поймёт, что клиент имел в виду). Карточек нет — сообщение агенту."""
         self.push("message", role="user", text=text)
+        if self.refuse(text):  # инъекция или злоупотребление: до модели и карточек не доходит
+            return "blocked"
         if self.pending:
             if qa.is_question(text):
                 asyncio.create_task(qa.answer(self, text))
