@@ -58,5 +58,31 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(store.stats({"city": "Казань", "rooms": 2}), {"total": 1, "mapped": 1, "crawl": None})
 
 
+class OldDatabaseTest(unittest.TestCase):
+    """База от версии до агента с tool calling: откладывается рядом, новая создаётся — история не теряется молча."""
+
+    def test_outdated_sqlite_is_backed_up(self):
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+        d = Path(tempfile.mkdtemp())
+        path = d / "app.db"
+        con = sqlite3.connect(path)
+        con.execute("CREATE TABLE chat_events (id INTEGER PRIMARY KEY, agent_session_id VARCHAR NOT NULL, seq INTEGER)")
+        con.execute("INSERT INTO chat_events (agent_session_id, seq) VALUES ('old', 1)")
+        con.commit()
+        con.close()
+        db.configure(f"sqlite:///{path}")
+        try:
+            backups = list(d.glob("app.db.old-*"))
+            self.assertEqual(len([b for b in backups if not b.name.endswith(("-wal", "-shm"))]), 1)
+            self.assertEqual(sqlite3.connect(backups[0]).execute("SELECT agent_session_id FROM chat_events").fetchone()[0], "old")
+            self.assertEqual(db._outdated_tables(db._engine), [])
+            db.configure(f"sqlite:///{path}")  # вторая загрузка новой базы — ничего не откладывает
+            self.assertEqual(len([b for b in d.glob("app.db.old-*") if not b.name.endswith(("-wal", "-shm"))]), 1)
+        finally:
+            db.configure("sqlite://")
+
+
 if __name__ == "__main__":
     unittest.main()

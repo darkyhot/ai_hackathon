@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from dataclasses import fields
 
 import httpx
@@ -55,8 +56,23 @@ async def _limits_and_headers(request: Request, call_next):
     return response
 
 
+def _version() -> str:
+    """Какая версия запущена: коммит git (виден в /api/health и в логе при старте)."""
+    import subprocess
+    try:
+        out = subprocess.run(["git", "log", "-1", "--format=%h %cd", "--date=format:%d.%m %H:%M"], cwd=Path(__file__).parent,
+                             capture_output=True, text=True, timeout=3)
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+VERSION = _version()
+
+
 @app.on_event("startup")
 async def _startup():
+    logging.getLogger("uvicorn.error").info("Агент сделки, версия %s (агент с tool calling и защитой от инъекций)", VERSION)
     db.configure()
     stt.preload_in_background()
     asyncio.create_task(_reaper())
@@ -115,6 +131,8 @@ async def health():
         llm, reason = None, str(exc)
     return {
         "ok": llm is not None,
+        "version": VERSION,
+        "agent": "tool_calling",
         "provider": llm.name if llm else settings.llm_provider,
         "model": llm.model if llm else None,
         "configured": settings.llm_provider,

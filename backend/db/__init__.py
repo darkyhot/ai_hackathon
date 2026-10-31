@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, TypeVar
 
@@ -43,6 +44,8 @@ def configure(url: str | None = None) -> Engine:
         kw["connect_args"] = {"check_same_thread": False}
     if _engine is not None:
         _engine.dispose()
+    if url.startswith("sqlite") and not (":memory:" in url or url in ("sqlite://", "sqlite:///")):
+        _backup_outdated_sqlite(url)
     engine = create_engine(url, **kw)
     if url.startswith("sqlite"):
         in_memory = ":memory:" in url or url in ("sqlite://", "sqlite:///")
@@ -58,6 +61,39 @@ def configure(url: str | None = None) -> Engine:
     _add_missing_columns(engine)
     _engine, _factory = engine, sessionmaker(engine, expire_on_commit=False)
     return engine
+
+
+def _outdated_tables(engine: Engine) -> list[str]:
+    """Таблицы, где есть обязательные колонки, которых нет в моделях: база от прошлой версии
+    (до агента с tool calling, например chat_events.agent_session_id). Новый код их не заполняет —
+    каждая запись в такую таблицу падала бы с NOT NULL, и история диалогов молча не сохранялась бы."""
+    insp = inspect(engine)
+    have = set(insp.get_table_names())
+    return [t.name for t in Base.metadata.sorted_tables if t.name in have and any(
+        c["name"] not in t.c and not c["nullable"] and c.get("default") is None and not c.get("primary_key")
+        for c in insp.get_columns(t.name))]
+
+
+def _backup_outdated_sqlite(url: str) -> None:
+    """Файл SQLite от прошлой версии откладываем рядом (app.db.old-<время>) и начинаем с чистой базы:
+    схему переписали целиком, перенос по колонкам терял бы данные молча. Ничего не удаляется."""
+    path = Path(url.split(":///", 1)[1]) if ":///" in url else None
+    if path is None or not path.exists():
+        return
+    probe = create_engine(url)
+    try:
+        outdated = _outdated_tables(probe)
+    finally:
+        probe.dispose()
+    if not outdated:
+        return
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    for suffix in ("", "-wal", "-shm"):
+        f = Path(f"{path}{suffix}")
+        if f.exists():
+            f.rename(f"{path}.old-{stamp}{suffix}")
+    log.warning("база %s — от прошлой версии (таблицы %s); отложена как %s.old-%s, создаю новую",
+                path, ", ".join(outdated), path.name, stamp)
 
 
 def _add_missing_columns(engine: Engine) -> None:
