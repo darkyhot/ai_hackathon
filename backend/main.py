@@ -53,6 +53,10 @@ async def _limits_and_headers(request: Request, call_next):
         response = await call_next(request)
     for k, v in SECURITY_HEADERS.items():
         response.headers.setdefault(k, v)
+    if not request.url.path.startswith("/api/"):
+        # интерфейс (index.html, js, css) браузер сверяет с сервером при каждом открытии (по ETag, ответ 304 —
+        # без повторной загрузки). Иначе после обновления кода браузер показывает закешированный старый JS
+        response.headers.setdefault("Cache-Control", "no-cache")
     return response
 
 

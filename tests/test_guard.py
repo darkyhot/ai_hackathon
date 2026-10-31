@@ -174,6 +174,8 @@ class HttpGuardTest(unittest.TestCase):
         self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(r.headers["X-Frame-Options"], "DENY")
         self.assertIn("Referrer-Policy", r.headers)
+        self.assertEqual(self.c.get("/js/app.js").headers.get("Cache-Control"), "no-cache")  # после обновления — свежий JS
+        self.assertEqual(self.c.get("/").headers.get("Cache-Control"), "no-cache")
 
     def test_sql_injection_in_auth_is_harmless(self):
         payloads = ["' OR 1=1 --", "admin'--", "a@b.ru' OR '1'='1", "x@y.ru\"; DROP TABLE users; --"]
