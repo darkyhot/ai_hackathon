@@ -68,7 +68,7 @@ export function profile(p) {
 
 // ------------------------------------------------------------------ финансы
 
-export function finance(d, opened = {}, selected) {
+export function finance(d, opened = {}, selected, loanChoice = null) {
   if (d.mode === "cash") {
     return html`
     <section class="panel">
@@ -83,14 +83,14 @@ export function finance(d, opened = {}, selected) {
       </div>
     </section>`;
   }
-  if (d.mode === "mortgage") return programs(d.programs) + mortgage(d.mortgage);
+  if (d.mode === "mortgage") return programs(d.programs) + mortgage(d.mortgage, loanChoice);
   const f = d.finance;
   const sel = f.strategies.find((s) => s.key === (selected || f.risk)) || f.strategies[0];
   const alloc = sel.mix.map((m) => ({ ...m, amount_now: Math.round((f.available * m.share) / 1000) * 1000, monthly: Math.round((f.monthly * m.share) / 1000) * 1000 }));
   const months = (m) => (m == null ? "дольше 10 лет" : m === 0 ? "уже хватает" : `${m} мес.`);
   return html`
   <section class="panel">
-    <h2 class="panel-title">Финансовая подготовка</h2>
+    <div class="eyebrow">Ваш финансовый помощник</div><h2 class="panel-title">Соберём первоначальный взнос</h2>
     <p class="panel-lead">${f.verdict}</p>
     <div class="fin-kpis">
       <div><span class="k">Нужно на взнос 20% и сделку</span><b class="num">${rub(f.need)}</b>${html.raw(f.matcap ? html`<small>маткапитал ${rub(f.matcap)} уже учтён</small>` : "")}</div>
@@ -117,10 +117,10 @@ export function finance(d, opened = {}, selected) {
           <button class="btn ${opened[a.product] ? "btn-ghost" : "btn-primary"} btn-small" data-open="${a.product}" data-amount="${a.amount_now}" ${opened[a.product] ? "disabled" : ""}>${opened[a.product] ? "Открыт" : "Открыть"}</button>
         </div>`).join(""))}
     </div>
-    <p class="hint">${f.assumption} Риск-профиль в проде подтвердит анкета брокера.</p>
+    <p class="hint">${f.assumption} Риск-профиль в проде подтвердит анкета брокера.</p><button type="button" class="btn btn-ghost" data-edit-finance>Изменить доходы, расходы и накопления</button>
   </section>
   ${html.raw(programs(d.programs))}
-  ${html.raw(mortgage(d.mortgage))}`;
+  ${html.raw(mortgage(d.mortgage, loanChoice))}`;
 }
 
 const PROGRAM_TAG = {
@@ -165,31 +165,30 @@ function programs(p) {
 }
 
 
-function mortgage(m) {
+function mortgage(m, selected = null) {
+  if (!m?.scenarios?.length) return "";
   const cards = m.scenarios.map((s) => {
     const best = s.title === m.recommended;
+    const chosen = s.title === selected;
     const status = s.savings_gap
-      ? html`<span class="tag tag-amber">на взнос не хватает ${rub(s.savings_gap)}</span>`
-      : s.fits_income ? html`<span class="tag tag-green">по силам</span>` : html`<span class="tag tag-red">высокий платёж</span>`;
-    return html`
-      <article class="scenario ${best ? "is-best" : ""}">
-        <h3>${s.title}</h3>
-        <div class="big num">${rub(s.monthly)}<small style="font-size:14px;font-weight:500"> / мес</small></div>
-        <dl>
-          <dt>Ставка</dt><dd class="num">${pct(s.rate)}</dd>
-          <dt>Кредит</dt><dd class="num">${rub(s.loan)}</dd>
-          <dt>Первый взнос</dt><dd class="num">${rub(s.down_payment)}</dd>
-          <dt>Переплата</dt><dd class="num">${mln(s.overpay)}</dd>
-          <dt>Нужен доход</dt><dd class="num">${rub(s.income_needed)}</dd>
-        </dl>
-        <p style="margin:12px 0 0">${html.raw(status)}</p>
-      </article>`;
+      ? html`<p class="loan-warning">На взнос и расходы нужно ещё <b>${rub(s.savings_gap)}</b>.</p>`
+      : html`<p class="hint">${s.fits_income === null ? "Доход нужно уточнить, доступность не подтверждена." : "На взнос по введённым данным хватает."}</p>`;
+    return html`<article class="scenario loan-option ${best ? "is-best" : ""} ${chosen ? "is-selected" : ""}">
+      <div class="loan-label">${html.raw(best ? '<span class="tag tag-green"><b aria-hidden="true">✓</b> Сбер · рекомендую</span>' : '<span class="tag">Расчётный вариант</span>')}</div>
+      <h3>${s.title}</h3>
+      <div class="big num">${rub(s.monthly)}</div><span class="hint">в месяц · ${s.years} лет</span>
+      <div class="loan-rate">${pct(s.rate)} годовых</div>
+      <dl><dt>Первый взнос</dt><dd>${rub(s.down_payment)}</dd><dt>Кредит</dt><dd>${mln(s.loan)}</dd><dt>Переплата за срок</dt><dd>${mln(s.overpay)}</dd><dt>Нужен доход от</dt><dd>${rub(s.income_needed)} / мес.</dd></dl>
+      ${html.raw(status)}${html.raw(s.fits_income === false ? '<p class="loan-warning">Платёж превышает половину указанного дохода.</p>' : '')}
+      ${html.raw(best ? '<p class="hint">Рекомендация рассчитана агентом. Проверьте достаточность взноса и дохода перед решением.</p>' : '')}
+      <button type="button" class="btn ${chosen ? 'btn-primary' : 'btn-ghost'}" data-loan-choice="${s.title}" aria-pressed="${chosen}">${chosen ? '✓ Выбрано' : 'Выбрать вариант'}</button>
+    </article>`;
   });
-  return html`
-  <section class="panel">
-    <h2 class="panel-title">Ипотека</h2>
-    <p class="panel-lead">${m.program || "Ипотека"}: три сценария${m.scenarios.every((s) => s.rate === m.rate) ? ` по ставке ${pct(m.rate)}` : ", ставка зависит от взноса"}. Каждые 100 000 ₽, которые агент сторгует, — это минус ${rub(m.per_100k_discount)} в месяц.</p>
-    <div class="scenarios">${html.raw(cards.join(""))}</div>
+  return html`<section class="panel"><div class="eyebrow">Ипотечные сценарии</div><h2 class="panel-title">Сравним платёж и переплату</h2>
+    <p class="panel-lead">${m.program || 'Ипотека'}. Нажмите подходящий вариант, затем передайте выбор агенту.</p>
+    <div class="scenarios">${html.raw(cards.join(''))}</div>
+    ${html.raw(selected ? html`<div class="loan-choice-summary"><b>✓ Выбрано: ${selected}</b><button type="button" class="btn btn-primary" data-send-loan>Передать выбор агенту</button></div>` : '')}
+    <p class="hint mortgage-disclaimer">Все предложения по ипотеке — недействующие предложения банка. Дополнительные условия и страховки не проверялись.</p>
   </section>`;
 }
 
@@ -220,7 +219,7 @@ export function search(d) {
           <div class="band" style="left:${x(r.low)}%;width:${x(r.high) - x(r.low)}%"></div>
           <div class="tick" style="left:${x(r.price)}%" title="Цена объявления ${rub(r.price)}"></div>
         </div>
-        <div class="delta num" style="color:${dlt > 0 ? "var(--amber)" : "var(--green-strong)"}">${dlt > 0 ? "+" : "−"}${rub(Math.abs(dlt))}</div>
+        <div class="fair-price"><b class="num">${rub(r.price)}</b><small>${r.price>r.high ? html`На ${rub(r.price-r.high)} выше верхней границы аналогов` : r.price<r.low ? html`На ${rub(r.low-r.price)} ниже нижней границы аналогов` : "В диапазоне аналогов"}</small></div>
       </div>`;
   });
   return html`
@@ -302,6 +301,7 @@ function offerCard(c, vote, no) {
       ${html.raw(c.match ? html`<p class="meta ${c.match.status === "confirmed" ? "" : "missing"}">${c.match.status === "confirmed" ? "Обязательные условия подтверждены" : c.match.status === "rejected" ? "Есть несоответствия условиям" : `Нужно проверить: ${c.match.unknown.join(", ")}`}</p>` : "")}
       ${html.raw(c.match?.checks?.filter((r) => r.source === "cian_description" && r.key.startsWith("poi:")).map((r) => html`<p class="hint">В описании упомянуто: ${r.label}. Расстояние по карте не подтверждено.</p>`).join("") || "")}
 
+      ${html.raw(c.match?.checks?.length ? html`<details class="criteria-detail"><summary>Критерии и подробности</summary><table><thead><tr><th>Критерий</th><th>Результат</th></tr></thead><tbody>${html.raw(c.match.checks.map(r => html`<tr><td>${r.label}${r.required ? '' : ' · пожелание'}</td><td>${r.status === true ? '✓ Подтверждено' : r.status === false ? 'Не соответствует' : 'Нет данных'}${r.evidence ? html.raw(html`<small>${r.evidence}</small>`) : ''}</td></tr>`).join(''))}</tbody></table></details>` : '')}
       ${html.raw(featureChips(c.features))}
       ${html.raw(nearbyChips(c.nearby))}
       ${html.raw(c.unchecked?.length ? html`<p class="missing">Не проверено по карте: ${c.unchecked.join(", ")}</p>` : "")}
@@ -331,7 +331,7 @@ export function selection(d, marks) {
   <section class="panel">
     <div class="sel-head">
       <div>
-        <h2 class="panel-title">Подборка${d.round > 1 ? ` · раунд ${d.round}` : ""}</h2>
+        <div class="eyebrow">Подборка${d.round > 1 ? ` · раунд ${d.round}` : " · первые результаты"}</div><h2 class="panel-title">Квартиры под ваши пожелания</h2>
         <p class="panel-lead">Отметьте, что нравится и что нет, — агент учтёт это в следующей подборке. Пожелание можно написать в чат или сказать голосом.</p>
       </div>
     </div>
@@ -340,7 +340,7 @@ export function selection(d, marks) {
     <div class="offers">${html.raw(d.cards.map((c, i) => offerCard(c, vote(c.id), i + 1)).join(""))}</div>
     <div class="sel-actions">
       <button class="btn btn-ghost" data-selection="more">Подобрать ещё с учётом отметок</button>
-      <button class="btn btn-primary" data-selection="proceed">Звонить по отмеченным <span data-liked-count>(${marks.liked.size})</span></button>
+      <button class="btn btn-primary" data-selection="proceed">Проверить выбранные <span data-liked-count>(${marks.liked.size})</span></button>
     </div>
   </section>`;
 }
@@ -363,7 +363,7 @@ export function legal(d) {
   return html`
   <section class="panel">
     <h2 class="panel-title">Проверка рисков</h2>
-    <p class="panel-lead">По данным объявления: проверка площадкой, апартаменты, торги и тревожные слова в описании (доли, наследство, перепланировка). Выписки ЕГРН, ФССП и реестра банкротств агент закажет после выбора квартиры.</p>
+    <p class="panel-lead">По данным объявления: проверка площадкой, апартаменты, торги и тревожные слова в описании (доли, наследство, перепланировка). Выписки ЕГРН, ФССП и реестра банкротств на этом этапе не запрашивались.</p>
     <div class="legal-grid">${html.raw(cards.join(""))}</div>
   </section>`;
 }

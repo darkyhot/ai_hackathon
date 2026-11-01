@@ -15,6 +15,7 @@ export function initCards(handlers) {
 }
 
 function settle(card, label) {
+  card.querySelectorAll("button, input, select").forEach(x => x.disabled = true);
   card.classList.add("is-done");
   card.append(el(html`<div class="verdict">Решение: ${label}</div>`));
 }
@@ -99,24 +100,43 @@ function collectForm(card) {
   return data;
 }
 
+function updateDecisionLayout() {
+  const host = $("decisionHost");
+  document.querySelector("section.stage")?.classList.toggle("has-decision", Boolean(host?.querySelector(".confirm:not(.is-done)")));
+}
+
+function presentDecision(card, live) {
+  $("decisionHost").append(card);
+  updateDecisionLayout();
+  if (live) card.scrollIntoView({block: "start", behavior: "smooth"});
+}
+
+function archiveDecision(card) {
+  if (!card) return;
+  chatLog.append(card);
+  updateDecisionLayout();
+}
+
 export function confirmCard(ev) {
   if (ev.kind === "selection") return; // решения подборки — на экране подбора
   const live = !ev.replay; // из истории — без голоса, звонка и фокуса
   const card = el(html`<div class="confirm confirm-${ev.kind}"><h4>${ev.title}</h4><p>${ev.text}</p><div data-extra></div><div class="actions"></div></div>`);
   const extra = card.querySelector("[data-extra]");
   const actions = card.querySelector(".actions");
+  state.cards[ev.kind]?.remove?.();
   state.cards[ev.kind] = card;
 
   if (ev.kind === "clarify") {
     state.awaiting = "clarify";
     const chips = ev.chips || [];
     if (live) sayPrompt(chips.length ? `${ev.text} Например: ${chips.slice(0, 3).join(", или ")}.` : ev.text);
-    extra.innerHTML = html`<p class="hint">Ответьте в поле ниже — текстом или голосом.</p>
+    extra.innerHTML = html`<p class="hint">Ответьте в диалоге с агентом — текстом или голосом.</p><button type="button" class="btn btn-ghost btn-small" data-answer-chat>Написать ответ</button>
       ${html.raw(chips.length ? html`<div class="quick">${html.raw(chips.map((c) => html`<button class="chip-btn" data-quick="${c}">${c}</button>`).join(""))}</div>` : "")}`;
+    extra.querySelector("[data-answer-chat]").addEventListener("click", () => { $("chatPanel").classList.add("expanded"); $("chatToggle").textContent="Свернуть ↓"; $("chatToggle").setAttribute("aria-expanded", "true"); $("query").focus(); });
     extra.querySelectorAll("[data-quick]").forEach((b) => b.addEventListener("click", () => sendText(b.dataset.quick)));
-    chatLog.append(card);
+    presentDecision(card, live);
     chatLog.scrollTop = chatLog.scrollHeight;
-    if (live) $("query").focus();
+    if (live) card.querySelector("[data-quick]")?.focus({preventScroll:true});
     return;
   }
 
@@ -160,7 +180,7 @@ export function confirmCard(ev) {
     housing: [["Новостройки и вторичка", true, { housing: "both" }], ["Только новостройки", true, { housing: "new" }], ["Только вторичка", true, { housing: "secondary" }]],
     call: [
       ...(config.phoneReady ? [["Позвонить мне на телефон", true, { mode: "phone" }]] : []),
-      ["Звонить — продавца играет ИИ", true, { mode: "auto" }], ["Звонить — продавец я (в чате)", true, { mode: "human" }], ["Пропустить объект", false, {}],
+      ["Звонит ИИ", true, { mode: "auto" }], ["Продавец — я (в чате)", true, { mode: "human" }], ["Пропустить объект", false, {}],
     ],
     price: [[`Подтвердить ${rub(ev.price)}`, true, {}], ["Отклонить, звонить дальше", false, {}]],
     object: [["Выбираю эту квартиру", true, {}], ["Ищем дальше", false, {}]],
@@ -187,7 +207,7 @@ export function confirmCard(ev) {
     });
     actions.append(b);
   });
-  chatLog.append(card);
+  presentDecision(card, live);
   chatLog.scrollTop = chatLog.scrollHeight;
   if (!live) return;
   actions.querySelector("button")?.focus({ preventScroll: true });
@@ -203,6 +223,7 @@ export function resolved(ev) {
     if (ev.kind === "clarify") card.classList.add("is-done");
     else settle(card, ev.label || (ev.approved === null ? "ответили сообщением" : ev.approved ? "да" : "нет"));
   }
+  if (card) archiveDecision(card);
   delete state.cards[ev.kind];
   if (state.awaiting === ev.kind) state.awaiting = null;
 }
@@ -213,6 +234,7 @@ export function staleCards() {
     if (kind === "selection") continue; // кнопки подборки — на экране, их выключаем ниже
     if (kind === "clarify") card.classList.add("is-done");
     else settle(card, "не принято — напишите сообщение, чтобы продолжить диалог");
+    archiveDecision(card);
   }
   state.cards = {};
   state.awaiting = null;

@@ -12,7 +12,7 @@ export const config = { phoneReady: false, sellerPhoneDefault: "", cities: {} };
 function freshState() {
   return {
     sid: null, es: null, running: false, streamEnded: false, results: {}, status: Array(10).fill("idle"), view: 0,
-    call: null, phone: null, marks: { liked: new Set(), disliked: new Set() }, opened: {}, strategy: null, awaiting: null,
+    call: null, phone: null, marks: { liked: new Set(), disliked: new Set() }, opened: {}, strategy: null, loanChoice: null, awaiting: null,
     cards: {}, lastSeq: 0, retries: 0, // карточки решений по виду; последнее полученное событие ленты
   };
 }

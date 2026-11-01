@@ -42,7 +42,7 @@ function viewFor(n) {
   const r = state.results;
   switch (n) {
     case 1: return r[1] ? V.profile(r[1]) : V.waiting("Разбираю запрос", "Город, бюджет, комнаты и ваши пожелания. Если чего-то не хватит — спрошу.");
-    case 2: return r[2] ? V.finance(r[2], state.opened, state.strategy) : V.waiting("Финансы", "Ответьте в чате, как планируете покупать: наличными, в ипотеку или ещё копите на взнос.");
+    case 2: return r[2] ? V.finance(r[2], state.opened, state.strategy, state.loanChoice) : V.waiting("Финансы", "Ответьте в чате, как планируете покупать: наличными, в ипотеку или ещё копите на взнос.");
     case 3: return r[3] ? V.search(r[3]) : V.waiting("Ищу объявления", "Запрашиваю Циан и считаю справедливую цену по похожим квартирам.");
     case 4: return r[4] ? V.selection(r[4], state.marks) : V.waiting("Подбор", "Готовлю подборку.");
     case 5: return r[5] ? V.legal(r[5]) : V.waiting("Проверка", "Смотрю риски по данным объявления.");
@@ -67,6 +67,10 @@ function renderStage() {
     syncSelectionButtons();
   }
   renderStepper();
+  const context = $("searchContext");
+  context.querySelector("[data-open-finance]")?.remove();
+  if (state.results[2]) context.insertAdjacentHTML("beforeend", '<button type="button" class="link-btn finance-link" data-open-finance>Финансовый план</button>');
+  if (state.view === 2 && state.results[4]) stage.insertAdjacentHTML("beforeend", '<div class="actions"><button type="button" class="btn btn-ghost" data-return-selection>Вернуться к подборке</button></div>');
 }
 
 /** Кнопки подборки активны, только пока агент ждёт выбора. */
@@ -142,7 +146,7 @@ async function handle(ev, myGen) {
       await pause(ev.kind === "selection" ? 0 : 500);
       break;
     case "confirm":
-      setChatExpanded(ev.kind !== "selection");
+      setChatExpanded(false);
       if (ev.kind === "call") {
         state.call = createCall(ev);
         state.view = 6;
@@ -187,7 +191,7 @@ async function handle(ev, myGen) {
       } else {
         // в голосовом режиме звонок звучит всегда
         await voice.speak(ev.text, ev.speaker, talk.on);
-        if (!voice.enabled && !talk.on) await sleep(Math.min(3000, 800 + ev.text.length * 16));
+        if (!voice.enabled && !talk.on) await sleep(Math.min(1600, 350 + ev.text.length * 8));
         else await sleep(Math.max(0, 300 - (performance.now() - t0)));
       }
       node?.classList.remove("is-speaking");
@@ -317,6 +321,8 @@ function leaveChat() {
   queue = [];
   resetState();
   chatLog.innerHTML = "";
+  $("decisionHost").replaceChildren();
+  document.querySelector("section.stage")?.classList.remove("has-decision");
   $("chatPeek").textContent = "";
   refreshContext(null);
   renderStage();
@@ -414,7 +420,7 @@ async function sendText(text) {
     // подборка и подтверждение ждут дальше, их кнопки должны работать
     if (r.handled_as === "question" || r.handled_as === "blocked") return;
     if (state.awaiting === "clarify") {
-      chatLog.querySelectorAll(".confirm-clarify:not(.is-done)").forEach((c) => c.classList.add("is-done"));
+      document.querySelectorAll(".confirm-clarify:not(.is-done)").forEach((c) => c.classList.add("is-done"));
     }
     state.awaiting = null;
   } catch (e) {
@@ -427,11 +433,11 @@ async function selectionAction(action, said = null) {
   if (state.awaiting !== "selection") return;
   if (action === "proceed" && !state.marks.liked.size) {
     if (said) talk.say("Вы ничего не отметили — позвоню по трём лучшим вариантам.");
-    else if (!confirm("Вы ничего не отметили. Позвонить по трём лучшим вариантам?")) return;
+    else if (!confirm("Вы ничего не отметили. Проверить три лучших варианта?")) return;
   }
   state.awaiting = null;
   stage.querySelectorAll("[data-selection]").forEach((b) => (b.disabled = true));
-  const label = action === "proceed" ? "звонить по отмеченным" : "подобрать ещё";
+  const label = action === "proceed" ? "проверить выбранные квартиры" : "подобрать ещё";
   try {
     await api.confirm(state.sid, "selection", true, {
       action, liked: [...state.marks.liked], disliked: [...state.marks.disliked], _label: label, ...(said ? { _said: said } : {}),
@@ -453,6 +459,8 @@ function setProvider(p) {
 }
 
 // ------------------------------------------------------------------ обработчики UI
+
+document.addEventListener("click", (e) => { if (e.target.closest("[data-open-finance]")) show(2); });
 
 $("composer").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -481,6 +489,23 @@ stage.addEventListener("click", async (e) => {
   const sel = e.target.closest("[data-selection]");
   if (sel) return selectionAction(sel.dataset.selection);
 
+  if (e.target.closest("[data-return-selection]")) return show(4);
+  const loan = e.target.closest("[data-loan-choice]");
+  if (loan) {
+    state.loanChoice = loan.dataset.loanChoice;
+    renderStage();
+    return;
+  }
+  const loanSend = e.target.closest("[data-send-loan]");
+  if (loanSend && state.loanChoice) {
+    const item = state.results[2]?.mortgage?.scenarios.find(s => s.title === state.loanChoice);
+    if (item) await sendText(`Предпочитаю ипотечный вариант: ${item.title}, первый взнос ${item.down_payment} рублей, ставка ${item.rate*100}%, платёж ${item.monthly} рублей в месяц. Учти этот выбор при дальнейшем расчёте.`);
+    return;
+  }
+  if (e.target.closest("[data-edit-finance]")) {
+    await sendText("Хочу пересчитать план первоначального взноса. Покажи, пожалуйста, анкету доходов, расходов и накоплений для редактирования.");
+    return;
+  }
   const strat = e.target.closest("[data-strategy]");
   if (strat) {
     state.strategy = strat.dataset.strategy;

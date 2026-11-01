@@ -79,7 +79,7 @@ export function renderCall(c, onSellerSubmit) {
       <div class="call-status ${c.ended ? "is-ended" : ""}"><span class="rec"></span><span data-status>${statusText}</span></div>
     </div>
     <div class="call-meta">
-      <ol class="phases" data-phases>
+      <ol class="phases" data-phases hidden aria-hidden="true">
         ${html.raw(phases.map(([k, t]) => html`<li data-phase="${k}" class="${phaseClass(c, k, order)}">${t}</li>`).join(""))}
       </ol>
       <span class="sim-note">${SIM_NOTES[c.mode] || SIM_NOTES.auto}</span>

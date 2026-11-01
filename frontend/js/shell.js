@@ -66,7 +66,9 @@ export function initShell({ start }) {
       const budget = Number($('portalBudget').value);
       const housing = {both: 'новостройки и вторичка', new: 'только новостройки', secondary: 'только вторичка'}[market];
       const query = `Ищу ${rooms === '0' ? 'студию' : `${rooms}-комнатную квартиру`} в ${city || 'Москве'}${budget > 0 ? ` до ${budget} млн рублей` : ', бюджет пока не знаю'}, ${housing}`;
-      showAgent(); setChatExpanded(true); start(query);
+      $('entryQuery').value = query;
+      $('entryDialog').showModal();
+      $('entryQuery').focus();
     }
   });
   $('entryForm').addEventListener('submit', (event) => {
