@@ -115,7 +115,7 @@ async function handle(ev, myGen) {
   const pause = (ms) => (quiet ? null : sleep(ms));
   if (ev.seq) state.lastSeq = Math.max(state.lastSeq, ev.seq);
   switch (ev.type) {
-    case "provider": setProvider(ev); break;
+    case "provider": if (!quiet) setProvider(ev); break; // старый сбой из истории — не текущее состояние модели
     case "message":
       addMsg(ev.role, ev.text);
       if (ev.await_reply) setChatExpanded(true);

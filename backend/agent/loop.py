@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import dataclasses
 import json
 import uuid
@@ -21,6 +22,8 @@ from .features import FEATURES
 from .numbers import fmt
 from .profile import missing_required
 from .session import close_dangling_calls
+
+log = logging.getLogger(__name__)
 
 MAX_ACTIONS_IN_ROW = 14  # действий подряд без ответа клиенту — дальше модель должна заговорить с клиентом
 
@@ -122,6 +125,8 @@ async def run(s) -> None:
             if isinstance(exc, LLMBusy):
                 text = "Сейчас много обращений, модель занята. Напишите чуть позже — продолжу с сохранёнными условиями."
             elif isinstance(exc, LLMError):
+                # настоящая причина — в лог сервера: ключ (401), баланс (402), лимит (429), сеть/VPN (ConnectError)
+                log.warning("Модель %s не ответила: %s", s.llm.name, exc)
                 s.push("provider", provider=s.llm.name, model=s.llm.model, degraded=True, reason="Модель временно недоступна")
                 text = f"Модель {s.llm.name} сейчас не отвечает. Напишите, когда попробовать снова — продолжу с того же места."
             elif reason == "repeated_tool":
