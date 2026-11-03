@@ -241,7 +241,10 @@ if __name__ == "__main__":
         print(f"Аккаунт: {acc.get('account_name')} (id {acc.get('account_id')}), "
               f"баланс {acc.get('live_balance', acc.get('balance'))} {acc.get('currency', '')}")
         cfg = await setup(force=True)
-        print(f"Приложение: {cfg['app']} (узел {cfg['node'] or 'не определён — задайте VOXIMPLANT_NODE'})")
+        print(f"Приложение: {cfg['app']} (узел: {cfg['node'] or 'по умолчанию'})")
+        if not cfg["node"]:
+            print("  Если на главной кабинета в блоке «Данные для API, SDK, SIP» указан узел (NODE_…), "
+                  "впишите его в VOXIMPLANT_NODE. Если узла там нет — ничего делать не нужно.")
         print(f"Пользователь для звонков: {cfg['username']}")
         print(f"Сценарий {SCENARIO_NAME} загружен, правило {RULE_NAME} → сценарий")
         print(f"Голос: {cfg['voice']}, распознавание: {cfg['asr']}")
