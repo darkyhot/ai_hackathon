@@ -224,6 +224,12 @@ class SetupTest(PhoneTestCase):
         self.cloud.callerids = self.cloud.callerids[1:]
         self.assertEqual(asyncio.run(phone.setup(force=True))["callerid"], "")
 
+    def test_test_mode_callerid(self):
+        self.use(settings(voximplant_caller_id="default"))
+        cfg = asyncio.run(phone.config())
+        self.assertEqual(cfg["callerid"], "default")
+        self.assertIn("тестовый режим", asyncio.run(phone.callerid_status("default")))
+
     def test_one_time_key_hash(self):
         key = "4c7ab8e1d2"
         expected = hashlib.md5(

@@ -126,6 +126,9 @@ def _verified(c: dict) -> bool:
 
 async def callerid_status(number: str) -> str:
     """Можно ли звонить с этого номера: арендован, подтверждён (до какой даты) или нет — для проверки настроек."""
+    if number == "default":
+        return ("тестовый режим (callerid «default»): звонить можно только на личный номер, подтверждённый "
+                "в кабинете для тестовых звонков")
     digits = _digits(number)
     for n in (await api("GetPhoneNumbers", count=50)).get("result") or []:
         if _digits(n.get("phone_number", "")) == digits:
@@ -144,6 +147,8 @@ async def callerid_status(number: str) -> str:
 async def _caller_id() -> str:
     """Номер, с которого звонить: из .env, иначе первый арендованный, иначе первый подтверждённый Caller ID."""
     if settings.voximplant_caller_id:
+        if settings.voximplant_caller_id.strip().lower() == "default":
+            return "default"  # тестовый режим российской площадки: звонки только на подтверждённый личный номер
         return _digits(settings.voximplant_caller_id)
     numbers = (await api("GetPhoneNumbers", count=20)).get("result") or []
     for n in numbers:
@@ -275,7 +280,8 @@ if __name__ == "__main__":
         print(f"Номер для звонков: {cfg['callerid'] or 'НЕТ — арендуйте номер или укажите VOXIMPLANT_CALLER_ID'}")
         if cfg["callerid"]:
             print(f"  Статус номера: {await callerid_status(cfg['callerid'])}")
-            print("  Звоните на другой телефон: звонок с номера на этот же номер оператор отклонит (403 Forbidden).")
+            if cfg["callerid"] != "default":
+                print("  Звоните на другой телефон: звонок с номера на этот же номер оператор отклонит (403 Forbidden).")
         return 0 if cfg["callerid"] else 2
 
     try:

@@ -110,6 +110,7 @@ const CASES = {
   bad_number() { const e = makeEnv(); e.incoming({ to: "12345", callerid: CFG.callerid }); e.advance(1000); return e; },
   no_callerid() { const e = makeEnv(); e.incoming({ to: CFG.to }); return e; },
   same_number() { const e = makeEnv(); e.incoming({ to: "79953277135", callerid: "+7 995 327-71-35" }); return e; },
+  test_mode() { const e = makeEnv(); e.incoming({ to: "+7 912 496-91-81", callerid: "Default" }); return e; },
   busy() {
     const e = makeEnv();
     e.incoming(CFG);

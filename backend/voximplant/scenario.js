@@ -16,7 +16,8 @@
  *   {"type":"failed","code":486,"reason":"…"} | {"type":"ended","reason":"seller"|"client"|"timeout"|…}
  *   {"type":"error","what":"tts"|"asr","text":"…"}
  * Сообщения от браузера: {"type":"say","id":N,"text":"…"} | {"type":"stop"} | {"type":"hangup"}
- * Параметры звонка — customData при вызове: {"to":"79991234567","callerid":"7…","voice":"…","asr":"…"}
+ * Параметры звонка — customData при вызове: {"to":"79991234567","callerid":"7…" | "default","voice":"…","asr":"…"}
+ *   callerid «default» — тестовый режим: звонить можно только на личный номер, подтверждённый в кабинете.
  */
 require(Modules.ASR);
 
@@ -110,7 +111,8 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, function (e) {
   web.answer();
 
   var to = String(cfg.to || "").replace(/\D/g, "");
-  var callerid = String(cfg.callerid || "").replace(/\D/g, "");
+  // «default» — тестовый режим российской площадки: звонок только на личный номер, подтверждённый в кабинете
+  var callerid = String(cfg.callerid || "").trim().toLowerCase() === "default" ? "default" : String(cfg.callerid || "").replace(/\D/g, "");
   if (!/^7\d{10}$/.test(to)) { send({ type: "failed", code: 484, reason: "Номер продавца: нужен российский номер +7 и 10 цифр." }); finish("bad_number"); return; }
   if (callerid && to === callerid) { send({ type: "failed", code: 482, reason: "Нельзя звонить на номер, с которого звонит агент: укажите другой телефон." }); finish("same_number"); return; }
   if (!callerid) { send({ type: "failed", code: 403, reason: "Нет номера, с которого звонить (арендованный номер или подтверждённый Caller ID)." }); finish("no_callerid"); return; }

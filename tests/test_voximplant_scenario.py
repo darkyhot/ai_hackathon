@@ -65,6 +65,10 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual(actions(r, "callPSTN"), [])
         self.assertEqual(r["toBrowser"][0]["code"], 482)
 
+    def test_test_mode_default_callerid(self):
+        r = run("test_mode")  # тестовый режим российской площадки: callPSTN(номер, "default")
+        self.assertEqual(actions(r, "callPSTN"), [["callPSTN", "79124969181", "default"]])
+
     def test_busy(self):
         r = run("busy")
         self.assertEqual(r["toBrowser"][0], {"type": "failed", "code": 486, "reason": "Busy Here"})
