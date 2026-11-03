@@ -138,7 +138,7 @@ def _node(app_full: str) -> str:
     if settings.voximplant_node:
         n = re.sub(r"\D", "", settings.voximplant_node)
         return f"NODE_{n}" if n else ""
-    m = re.search(r"\.n(\d+)\.voximplant\.", app_full)
+    m = re.search(r"\.n(\d+)\.voximplant\.", app_full) or re.match(r"api-node(\d+)\.", settings.voximplant_api_host)
     return f"NODE_{m.group(1)}" if m else ""
 
 

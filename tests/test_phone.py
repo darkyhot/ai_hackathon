@@ -149,6 +149,9 @@ class SetupTest(PhoneTestCase):
         self.assertEqual(asyncio.run(phone.setup())["node"], "NODE_2")  # домен приложения «…n2.voximplant.com»
         self.assertEqual(phone._node("domclick-agent.team.n11.voximplant.com"), "NODE_11")
         self.assertEqual(phone._node("domclick-agent.team.voximplant.com"), "")
+        # адрес API из кабинета «api-node3.voximplant.com» -> узел 3 (российский)
+        self.use(settings(voximplant_api_host="api-node3.voximplant.com"))
+        self.assertEqual(phone._node("domclick-agent.alndis.voximplant.com"), "NODE_3")
         self.use(settings(voximplant_node="node_4", voximplant_api_host="api.example.test"))
         self.assertEqual(phone._node("x.team.n2.voximplant.com"), "NODE_4")  # из .env важнее домена
         asyncio.run(phone.api("GetAccountInfo"))
