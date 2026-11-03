@@ -60,6 +60,11 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual(actions(r, "callPSTN"), [])
         self.assertEqual(r["toBrowser"][0]["code"], 403)
 
+    def test_same_number_never_dials(self):
+        r = run("same_number")  # звонок с номера на этот же номер оператор отклоняет (403) — не набираем вовсе
+        self.assertEqual(actions(r, "callPSTN"), [])
+        self.assertEqual(r["toBrowser"][0]["code"], 482)
+
     def test_busy(self):
         r = run("busy")
         self.assertEqual(r["toBrowser"][0], {"type": "failed", "code": 486, "reason": "Busy Here"})

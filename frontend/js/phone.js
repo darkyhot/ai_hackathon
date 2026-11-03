@@ -10,7 +10,7 @@ const CALL_TARGET = "seller"; // любое имя: правило прилож�
 // SIP-коды, которые сценарий пересылает из CallEvents.Failed
 const FAIL = {
   402: "Звонок не прошёл: на счёте Voximplant не хватает денег.",
-  403: "Voximplant не пропустил звонок: проверьте номер, с которого звоним (VOXIMPLANT_CALLER_ID), и баланс.",
+  403: "Voximplant не пропустил звонок (403): номер, с которого звоним, не подтверждён или не подходит для звонков по России. Проверьте: .venv/bin/python -m backend.phone",
   404: "Номер не найден.",
   408: "Никто не взял трубку.",
   480: "Номер недоступен.",
@@ -161,6 +161,10 @@ export class PhoneCall {
     } catch (e) {
       this.hangup();
       throw e;
+    }
+    if (number === String(cfg.callerid || "").replace(/\D/g, "")) {
+      this.hangup();
+      throw new Error("Это номер, с которого звонит агент: на него же позвонить нельзя. Укажите другой телефон — например, коллеги.");
     }
     onState("dialing");
     const t0 = performance.now();

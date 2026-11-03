@@ -208,6 +208,22 @@ class SetupTest(PhoneTestCase):
         self.use(settings(voximplant_caller_id="+7 999 000-00-01"))
         self.assertEqual(asyncio.run(phone.setup())["callerid"], "79990000001")
 
+    def test_callerid_status(self):
+        self.cloud.callerids = [
+            {"callerid_number": "79953277135", "active": True, "verified_until": "2027-11-03"},
+            {"callerid_number": "79160001122", "active": True, "code_entering_attempts_left": 3,
+             "verification_call_attempts_left": 5},
+        ]
+        st = lambda n: asyncio.run(phone.callerid_status(n))  # noqa: E731
+        self.assertEqual(st("+7 995 327-71-35"), "подтверждён до 2027-11-03")
+        self.assertIn("НЕ ПОДТВЕРЖДЁН", st("79160001122"))
+        self.assertIn("НЕ НАЙДЕН", st("79990000000"))
+        self.assertEqual(st("74951234567"), "арендован в Voximplant")
+        # неподтверждённый номер сервер сам не выбирает
+        self.cloud.numbers = []
+        self.cloud.callerids = self.cloud.callerids[1:]
+        self.assertEqual(asyncio.run(phone.setup(force=True))["callerid"], "")
+
     def test_one_time_key_hash(self):
         key = "4c7ab8e1d2"
         expected = hashlib.md5(

@@ -117,6 +117,30 @@ def _digits(phone: str) -> str:
     return re.sub(r"\D", "", phone or "")
 
 
+def _verified(c: dict) -> bool:
+    """Caller ID подтверждён: у подтверждённого есть дата verified_until, у неподтверждённого — попытки ввода кода."""
+    if "verified_until" in c or "verified" in c:
+        return bool(c.get("verified_until") or c.get("verified"))
+    return c.get("code_entering_attempts_left") is None
+
+
+async def callerid_status(number: str) -> str:
+    """Можно ли звонить с этого номера: арендован, подтверждён (до какой даты) или нет — для проверки настроек."""
+    digits = _digits(number)
+    for n in (await api("GetPhoneNumbers", count=50)).get("result") or []:
+        if _digits(n.get("phone_number", "")) == digits:
+            return "арендован в Voximplant"
+    for c in (await api("GetCallerIDs", count=50)).get("result") or []:
+        if _digits(c.get("callerid_number", "")) == digits:
+            if not c.get("active", True):
+                return "НЕ АКТИВЕН — включите его в кабинете (Настройки → Caller ID)"
+            if _verified(c):
+                return f"подтверждён до {c.get('verified_until')}" if c.get("verified_until") else "подтверждён"
+            return ("НЕ ПОДТВЕРЖДЁН — в кабинете (Настройки → Caller ID) запросите звонок с кодом и введите код"
+                    f" (попыток ввода кода: {c.get('code_entering_attempts_left', '?')})")
+    return "НЕ НАЙДЕН в аккаунте — добавьте и подтвердите его (Настройки → Caller ID) или арендуйте номер"
+
+
 async def _caller_id() -> str:
     """Номер, с которого звонить: из .env, иначе первый арендованный, иначе первый подтверждённый Caller ID."""
     if settings.voximplant_caller_id:
@@ -127,7 +151,7 @@ async def _caller_id() -> str:
             return _digits(n["phone_number"])
     callers = (await api("GetCallerIDs", active=True, count=20)).get("result") or []
     for c in callers:
-        if c.get("callerid_number") and c.get("verified", True):
+        if c.get("callerid_number") and _verified(c):
             return _digits(c["callerid_number"])
     return ""
 
@@ -249,6 +273,9 @@ if __name__ == "__main__":
         print(f"Сценарий {SCENARIO_NAME} загружен, правило {RULE_NAME} → сценарий")
         print(f"Голос: {cfg['voice']}, распознавание: {cfg['asr']}")
         print(f"Номер для звонков: {cfg['callerid'] or 'НЕТ — арендуйте номер или укажите VOXIMPLANT_CALLER_ID'}")
+        if cfg["callerid"]:
+            print(f"  Статус номера: {await callerid_status(cfg['callerid'])}")
+            print("  Звоните на другой телефон: звонок с номера на этот же номер оператор отклонит (403 Forbidden).")
         return 0 if cfg["callerid"] else 2
 
     try:

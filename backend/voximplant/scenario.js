@@ -112,6 +112,7 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, function (e) {
   var to = String(cfg.to || "").replace(/\D/g, "");
   var callerid = String(cfg.callerid || "").replace(/\D/g, "");
   if (!/^7\d{10}$/.test(to)) { send({ type: "failed", code: 484, reason: "Номер продавца: нужен российский номер +7 и 10 цифр." }); finish("bad_number"); return; }
+  if (callerid && to === callerid) { send({ type: "failed", code: 482, reason: "Нельзя звонить на номер, с которого звонит агент: укажите другой телефон." }); finish("same_number"); return; }
   if (!callerid) { send({ type: "failed", code: 403, reason: "Нет номера, с которого звонить (арендованный номер или подтверждённый Caller ID)." }); finish("no_callerid"); return; }
 
   pstn = VoxEngine.callPSTN(to, callerid);
