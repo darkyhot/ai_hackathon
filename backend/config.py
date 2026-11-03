@@ -40,9 +40,18 @@ class Settings:
     gigachat_queue_timeout_s: float = max(.1, float(os.getenv("GIGACHAT_QUEUE_TIMEOUT_S") or 25))
     llm_call_timeout_s: float = max(1, float(os.getenv("LLM_CALL_TIMEOUT_S") or 60))
 
-    # МТС Exolve: настоящий звонок продавцу (синтез речи + SIP через WebRTC)
-    exolve_api_key: str = os.getenv("EXOLVE_API_KEY", "")
-    exolve_voice: int = int(os.getenv("EXOLVE_VOICE", "13") or 13)  # 13 — Кирилл
+    # Voximplant: настоящий звонок продавцу (звонок, синтез речи и распознавание — в облаке Voximplant).
+    # Доступ к API — один из двух способов: ID аккаунта + API-ключ или JSON-файл сервисного аккаунта.
+    voximplant_account_id: str = os.getenv("VOXIMPLANT_ACCOUNT_ID", "").strip()
+    voximplant_api_key: str = os.getenv("VOXIMPLANT_API_KEY", "").strip()
+    voximplant_credentials: str = os.getenv("VOXIMPLANT_CREDENTIALS", "").strip()  # путь к JSON сервисного аккаунта
+    voximplant_app: str = os.getenv("VOXIMPLANT_APP") or "domclick-agent"         # приложение создаётся само
+    # Узел аккаунта для Web SDK (NODE_4 …; виден на главной кабинета). Пусто — по домену приложения «…n4.voximplant…»
+    voximplant_node: str = os.getenv("VOXIMPLANT_NODE", "").strip().upper()
+    voximplant_api_host: str = os.getenv("VOXIMPLANT_API_HOST") or "api.voximplant.com"
+    voximplant_caller_id: str = os.getenv("VOXIMPLANT_CALLER_ID", "").strip()       # пусто — первый арендованный номер
+    voximplant_voice: str = os.getenv("VOXIMPLANT_VOICE") or "SaluteSpeech.ru_RU_sergey"  # голос агента (VoiceList)
+    voximplant_asr: str = os.getenv("VOXIMPLANT_ASR") or "SaluteSpeech.ru_RU"         # распознавание (ASRProfileList)
     seller_phone: str = os.getenv("SELLER_PHONE", "")
     # PIN для звонков на публичном сервере: без него любой посетитель звонил бы за ваш счёт
     phone_pin: str = os.getenv("PHONE_PIN", "")

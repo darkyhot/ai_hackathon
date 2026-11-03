@@ -7,7 +7,7 @@ const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const SIM_NOTES = {
   auto: "Симуляция: продавца играет ИИ, настоящему продавцу прототип не звонит",
   human: "Продавец — вы: отвечайте текстом или голосом",
-  phone: "Настоящий звонок через МТС Exolve: продавец — вы, на телефоне",
+  phone: "Настоящий звонок через Voximplant: продавец — вы, на телефоне",
 };
 
 function pageNote(p) {

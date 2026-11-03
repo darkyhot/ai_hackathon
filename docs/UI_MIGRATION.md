@@ -28,10 +28,10 @@
 
 ## Проверка
 
-Проверки выполняются с тестовой моделью и сохранёнными объявлениями через настоящий backend. Для изоляции телефонии тестовый сервер следует запускать с `EXOLVE_API_KEY=`. Нужны настроенное Python-окружение, Playwright и установленный Chromium.
+Проверки выполняются с тестовой моделью и сохранёнными объявлениями через настоящий backend. Для изоляции телефонии тестовый сервер следует запускать с пустыми `VOXIMPLANT_ACCOUNT_ID=` и `VOXIMPLANT_CREDENTIALS=`; звонок проверяется отдельно с `--fake-voximplant` (см. docs/VOXIMPLANT.md). Нужны настроенное Python-окружение, Playwright и установленный Chromium.
 
 ```bash
-EXOLVE_API_KEY= .venv/bin/python -m tests.e2e.server --port 8794
+VOXIMPLANT_ACCOUNT_ID= VOXIMPLANT_CREDENTIALS= .venv/bin/python -m tests.e2e.server --port 8794
 
 .venv/bin/python -m tests.e2e.browser_flow --base http://127.0.0.1:8794
 .venv/bin/python -m tests.e2e.ui_regressions --base http://127.0.0.1:8794

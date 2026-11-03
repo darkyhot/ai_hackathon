@@ -53,13 +53,57 @@ def patch(*, live_map: bool = False) -> None:
         main.maptiles.configuration = lambda: {'provider': 'osm'}
 
 
+def fake_voximplant() -> None:
+    """Звонок через Voximplant без облака: Web SDK подменён tests/e2e/fake_voximplant.js, который исполняет
+    в странице настоящий backend/voximplant/scenario.js. Сервер — настоящий (/api/phone, вход по одноразовому ключу)."""
+    import dataclasses
+
+    from fastapi.responses import FileResponse, JSONResponse
+    from starlette.routing import Route
+
+    from backend import main, phone
+    from backend.config import settings
+
+    phone.settings = dataclasses.replace(settings, voximplant_account_id="e2e", voximplant_api_key="e2e-key-0123456789",
+                                         voximplant_credentials="", phone_pin="")
+    cfg = {"username": "agent@domclick-agent.e2e.n4.voximplant.com", "app": "domclick-agent.e2e.n4.voximplant.com",
+           "node": "NODE_4",
+           "callerid": "74950000000", "voice": "SaluteSpeech.ru_RU_sergey", "asr": "SaluteSpeech.ru_RU"}
+
+    async def setup(force=False):
+        return cfg
+    phone.setup = setup
+    here = Path(__file__).resolve().parent
+
+    async def sdk(request):
+        return FileResponse(here / "fake_voximplant.js", media_type="text/javascript")
+
+    async def real_sdk(request):
+        return FileResponse(Path(main.__file__).resolve().parents[1] / "frontend" / "vendor" / "voximplant.min.js",
+                            media_type="text/javascript")
+
+    async def scenario(request):
+        return FileResponse(phone.SCENARIO_FILE, media_type="text/javascript")
+
+    async def verify(request):
+        key, got = request.query_params.get("key", ""), request.query_params.get("hash", "")
+        return JSONResponse({"ok": bool(key) and got == phone.login_hash(key)})
+
+    for path, fn in (("/vendor/voximplant.min.js", sdk), ("/__fake_vox/scenario.js", scenario), ("/__fake_vox/verify", verify),
+                     ("/__fake_vox/real-sdk.js", real_sdk)):
+        main.app.router.routes.insert(0, Route(path, fn))
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--live-map", action="store_true", help="Разрешить настоящие плитки 2ГИС из .env (расходует квоту)")
+    ap.add_argument("--fake-voximplant", action="store_true", help="Звонок через поддельный Web SDK и настоящий сценарий VoxEngine")
     args = ap.parse_args()
     os.environ.setdefault("DATABASE_URL", f"sqlite:///{tempfile.mkdtemp()}/e2e.db")
     patch(live_map=args.live_map)
+    if args.fake_voximplant:
+        fake_voximplant()
     import uvicorn
 
     from backend.main import app

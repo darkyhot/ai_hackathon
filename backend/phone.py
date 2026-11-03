@@ -1,187 +1,255 @@
-"""Настоящий звонок продавцу через МТС Exolve.
+"""Настоящий звонок продавцу через Voximplant.
 
-Звонит браузер: JsSIP подключается к webrtc.exolve.ru и набирает номер, в линию
-идёт голос агента, а голос продавца — обратно в браузер и на распознавание (Whisper).
-Сервер здесь делает две вещи:
-- синтез речи агента (Media API → WAV);
-- выдаёт браузеру логин и пароль SIP ID приложения (берёт их по API).
+Звонит облако Voximplant, а не браузер:
+  браузер (Web SDK) входит пользователем приложения и «звонит» в сценарий VoxEngine (backend/voximplant/scenario.js);
+  сценарий набирает продавца (callPSTN), произносит реплики агента (синтез речи Voximplant) и распознаёт
+  ответы продавца (ASR Voximplant), а браузеру присылает только текст.
 
-Что нужно в личном кабинете Exolve: купить номер и создать SIP ID с этим номером
-как определяемым. Ключ приложения — EXOLVE_API_KEY в .env.
+Сервер здесь:
+- сам настраивает приложение Voximplant: приложение, сценарий, правило, пользователь (setup, идемпотентно);
+- выдаёт браузеру имя пользователя и номер, с которого звонить, — без пароля;
+- считает хеш для входа по одноразовому ключу (loginWithOneTimeKey): пароль пользователя не покидает сервер.
 
-Проверка настроек:  .venv/bin/python -m backend.phone
+Доступ к API — VOXIMPLANT_ACCOUNT_ID + VOXIMPLANT_API_KEY или VOXIMPLANT_CREDENTIALS (JSON сервисного аккаунта).
+
+Проверка и настройка:  .venv/bin/python -m backend.phone          (проверить доступ, номер, приложение)
+                       .venv/bin/python -m backend.phone setup    (создать/обновить приложение и сценарий)
 """
 from __future__ import annotations
 
-import base64
-import io
+import asyncio
+import hashlib
+import hmac
+import json
 import re
 import secrets
 import time
-import wave
+from pathlib import Path
+from typing import Any
 
 import httpx
 
 from .config import settings
 
-API = "https://api.exolve.ru"
-WEBRTC_WS = "wss://webrtc.exolve.ru:443"
-WEBRTC_REALM = "webrtc.exolve.ru"
-MAX_TTS = 480  # лимит Exolve — 500 символов на запрос
+SCENARIO_FILE = Path(__file__).resolve().parent / "voximplant" / "scenario.js"
+SCENARIO_NAME = "domclick_seller_call"
+RULE_NAME = "seller_call"
+USER_NAME = "agent"
 
-_creds: dict | None = None
-_creds_at = 0.0
+_setup: dict | None = None
+_setup_lock = asyncio.Lock()
 
 
 class PhoneError(RuntimeError):
-    """Exolve не настроен или не ответил."""
+    """Voximplant не настроен или не ответил."""
 
 
 def configured() -> bool:
-    return bool(settings.exolve_api_key)
+    return bool((settings.voximplant_account_id and settings.voximplant_api_key) or settings.voximplant_credentials)
 
 
-async def _post(path: str, body: dict, timeout: float = 20) -> dict:
-    if not configured():
-        raise PhoneError("Нет EXOLVE_API_KEY в .env")
+# ------------------------------------------------------------------ HTTP API
+
+def _service_key() -> dict:
     try:
-        async with httpx.AsyncClient(timeout=timeout, transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0")) as client:
-            r = await client.post(f"{API}/{path}", json=body,
-                                  headers={"Authorization": f"Bearer {settings.exolve_api_key}"})
-    except httpx.HTTPError as exc:  # сеть до api.exolve.ru — понятная ошибка, а не 500
-        raise PhoneError(f"Нет связи с Exolve ({type(exc).__name__}). Проверьте интернет и попробуйте ещё раз.") from exc
-    if r.status_code != 200:
-        raise PhoneError(f"Exolve {path}: HTTP {r.status_code} {r.text[:200]}")
-    return r.json()
+        key = json.loads(Path(settings.voximplant_credentials).expanduser().read_text())
+    except (OSError, ValueError) as exc:
+        raise PhoneError(f"Не прочитать VOXIMPLANT_CREDENTIALS ({settings.voximplant_credentials}): {exc}") from exc
+    for field in ("account_id", "key_id", "private_key"):
+        if not key.get(field):
+            raise PhoneError(f"В файле сервисного аккаунта Voximplant нет поля {field}")
+    return key
 
 
-# ------------------------------------------------------------------ SIP-доступ для браузера
+def _auth() -> tuple[dict, dict]:
+    """(поля формы, заголовки) для запроса к Management API."""
+    if settings.voximplant_account_id and settings.voximplant_api_key:
+        return {"account_id": settings.voximplant_account_id, "api_key": settings.voximplant_api_key}, {}
+    if settings.voximplant_credentials:
+        import jwt  # pyjwt[crypto]: подпись RS256 ключом сервисного аккаунта
 
-async def credentials() -> dict:
-    """Логин и пароль первого SIP ID приложения (кешируются на 10 минут)."""
-    global _creds, _creds_at
-    if _creds and time.monotonic() - _creds_at < 600:
-        return _creds
-    sips = (await _post("number/customer/v1/GetSIPList", {"limit": 10, "offset": 0})).get("sips") or []
-    if not sips:
-        raise PhoneError("В приложении Exolve нет SIP ID. Купите номер и создайте SIP ID в личном кабинете "
-                         "(раздел «SIP-подключения»), выбрав этот номер определяемым.")
-    sip = next((s for s in sips if s.get("cli")), sips[0])
-    attrs = (await _post("sip/v1/GetAttributes", {"sip_resource_id": sip["sip_resource_id"]})).get("attributes") or {}
-    if not attrs.get("password"):
-        raise PhoneError("Exolve не вернул пароль SIP ID")
-    _creds = {
-        "username": attrs.get("username") or attrs.get("login") or sip["user_name"],
-        "password": attrs["password"],
-        "cli": attrs.get("cli") or sip.get("cli") or "",
-        "ws": WEBRTC_WS,
-        "realm": WEBRTC_REALM,
-    }
-    _creds_at = time.monotonic()
-    return _creds
+        key = _service_key()
+        now = int(time.time())
+        # iss — число, как в официальном клиенте Voximplant; jwt.encode требует строку, поэтому подписываем JWS напрямую
+        payload = json.dumps({"iss": key["account_id"], "iat": now, "exp": now + 60}).encode()
+        token = jwt.api_jws.encode(payload, key["private_key"], algorithm="RS256", headers={"kid": key["key_id"]})
+        return {}, {"Authorization": f"Bearer {token}"}
+    raise PhoneError("Voximplant не настроен: в .env нужны VOXIMPLANT_ACCOUNT_ID и VOXIMPLANT_API_KEY "
+                     "(или VOXIMPLANT_CREDENTIALS)")
 
 
-# ------------------------------------------------------------------ синтез речи
+async def api(cmd: str, **params: Any) -> dict:
+    """Вызов Management API: POST /platform_api/<cmd>. Ошибка Voximplant — PhoneError с его текстом."""
+    form, headers = _auth()
+    for k, v in params.items():
+        if v is None:
+            continue
+        form[k] = ("true" if v else "false") if isinstance(v, bool) else str(v)
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(f"https://{settings.voximplant_api_host}/platform_api/{cmd}/", data=form, headers=headers)
+    except httpx.HTTPError as exc:  # сеть до api.voximplant.com — понятная ошибка, а не 500
+        raise PhoneError(f"Нет связи с Voximplant ({type(exc).__name__}). Проверьте интернет и попробуйте ещё раз.") from exc
+    try:
+        data = r.json()
+    except ValueError:
+        raise PhoneError(f"Voximplant {cmd}: HTTP {r.status_code} {r.text[:200]}") from None
+    if r.status_code != 200 or "error" in data:
+        err = data.get("error") or {}
+        msg = err.get("msg") if isinstance(err, dict) else str(err)
+        code = err.get("code") if isinstance(err, dict) else None
+        if code in (100, 101, 103) or r.status_code == 401:
+            msg = f"Voximplant не принял ключ доступа ({msg}). Проверьте VOXIMPLANT_ACCOUNT_ID и VOXIMPLANT_API_KEY."
+        raise PhoneError(f"Voximplant {cmd}: {msg or r.text[:200]}")
+    return data
 
-SPEAK_FIXES = [
-    (r"₽", " рублей"),
-    (r"\bм²", " квадратных метров"),
-    (r"\bкв\.\s?м\b", "квадратных метров"),
-    (r"\bИИ-", "И И "),
-    (r"\bЕГРН\b", "Е Г Р Н"),
-    (r"\bСБР\b", "сервис безопасных расчётов"),
-]
+
+# ------------------------------------------------------------------ настройка приложения
+
+def _user_password() -> str:
+    """Пароль пользователя приложения: выводится из ключа доступа, нигде не хранится и браузеру не уходит."""
+    secret = settings.voximplant_api_key or settings.voximplant_credentials and _service_key()["private_key"] or ""
+    digest = hmac.new(secret.encode(), b"domclick-agent/voximplant-user", hashlib.sha256).hexdigest()
+    return f"Vx{digest[:22]}!9"  # требования Voximplant: буквы разного регистра, цифры, не короче 8
 
 
-def speakable(text: str) -> str:
-    for pattern, repl in SPEAK_FIXES:
-        text = re.sub(pattern, repl, text)
-    return re.sub(r"\s+", " ", text).strip()
+def _digits(phone: str) -> str:
+    return re.sub(r"\D", "", phone or "")
 
 
-def _chunks(text: str) -> list[str]:
-    """Режет текст по предложениям на куски не длиннее лимита Exolve."""
-    parts, cur = [], ""
-    for sentence in re.split(r"(?<=[.!?…])\s+", text):
-        while len(sentence) > MAX_TTS:  # очень длинное предложение — по словам
-            cut = sentence.rfind(" ", 0, MAX_TTS)
-            cut = cut if cut > 0 else MAX_TTS
-            if cur:
-                parts.append(cur)
-                cur = ""
-            parts.append(sentence[:cut])
-            sentence = sentence[cut:].strip()
-        if len(cur) + len(sentence) + 1 > MAX_TTS:
-            parts.append(cur)
-            cur = sentence
+async def _caller_id() -> str:
+    """Номер, с которого звонить: из .env, иначе первый арендованный, иначе первый подтверждённый Caller ID."""
+    if settings.voximplant_caller_id:
+        return _digits(settings.voximplant_caller_id)
+    numbers = (await api("GetPhoneNumbers", count=20)).get("result") or []
+    for n in numbers:
+        if n.get("phone_number") and not n.get("deactivated") and not n.get("canceled"):
+            return _digits(n["phone_number"])
+    callers = (await api("GetCallerIDs", active=True, count=20)).get("result") or []
+    for c in callers:
+        if c.get("callerid_number") and c.get("verified", True):
+            return _digits(c["callerid_number"])
+    return ""
+
+
+def _node(app_full: str) -> str:
+    """Узел аккаунта для Web SDK: из .env или из домена приложения «name.account.n4.voximplant.com» -> NODE_4.
+    Российские аккаунты (voximplant.ru) живут на своих узлах, и без узла Web SDK не войдёт."""
+    if settings.voximplant_node:
+        n = re.sub(r"\D", "", settings.voximplant_node)
+        return f"NODE_{n}" if n else ""
+    m = re.search(r"\.n(\d+)\.voximplant\.", app_full)
+    return f"NODE_{m.group(1)}" if m else ""
+
+
+async def _find_app(name: str) -> dict | None:
+    """Приложение по короткому имени: API отдаёт полное «name.account.n2.voximplant.com»."""
+    apps = (await api("GetApplications", count=100)).get("result") or []
+    return next((a for a in apps if a.get("application_name", "").split(".")[0] == name), None)
+
+
+async def setup(force: bool = False) -> dict:
+    """Создаёт или обновляет приложение, сценарий, правило и пользователя. Повторный вызов ничего не дублирует.
+
+    -> {"username": "agent@app.account.n2.voximplant.com", "app": …, "callerid": "7…", "voice": …, "asr": …}
+    """
+    global _setup
+    async with _setup_lock:
+        if _setup and not force:
+            return _setup
+        app_name = settings.voximplant_app
+        app = await _find_app(app_name)
+        if not app:
+            await api("AddApplication", application_name=app_name)
+            app = await _find_app(app_name)
+            if not app:
+                raise PhoneError(f"Voximplant не создал приложение {app_name}")
+        app_id, app_full = app["application_id"], app["application_name"]
+
+        script = SCENARIO_FILE.read_text(encoding="utf-8")
+        scenarios = (await api("GetScenarios", scenario_name=SCENARIO_NAME, application_id=app_id)).get("result") or []
+        if scenarios:
+            scenario_id = scenarios[0]["scenario_id"]
+            await api("SetScenarioInfo", scenario_id=scenario_id, scenario_script=script)
         else:
-            cur = f"{cur} {sentence}".strip()
-    if cur:
-        parts.append(cur)
-    return parts
+            added = await api("AddScenario", scenario_name=SCENARIO_NAME, scenario_script=script, application_id=app_id)
+            scenario_id = added.get("scenario_id")
+            if not scenario_id:  # старые версии API не возвращают id
+                scenario_id = (await api("GetScenarios", scenario_name=SCENARIO_NAME, application_id=app_id))["result"][0]["scenario_id"]
+
+        rules = (await api("GetRules", application_id=app_id, rule_name=RULE_NAME)).get("result") or []
+        if not rules:
+            await api("AddRule", application_id=app_id, rule_name=RULE_NAME, rule_pattern=".*", scenario_id=scenario_id)
+
+        password = _user_password()
+        users = (await api("GetUsers", application_id=app_id, user_name=USER_NAME)).get("result") or []
+        if users:
+            await api("SetUserInfo", user_id=users[0]["user_id"], user_password=password, user_active=True)
+        else:
+            await api("AddUser", application_id=app_id, user_name=USER_NAME, user_display_name="Агент сделки",
+                      user_password=password)
+
+        _setup = {
+            "username": f"{USER_NAME}@{app_full}",
+            "app": app_full,
+            "node": _node(app_full),
+            "callerid": await _caller_id(),
+            "voice": settings.voximplant_voice,
+            "asr": settings.voximplant_asr,
+        }
+        return _setup
 
 
-def _join_wavs(blobs: list[bytes]) -> bytes:
-    if len(blobs) == 1:
-        return blobs[0]
-    out = io.BytesIO()
-    with wave.open(io.BytesIO(blobs[0])) as first:
-        params = first.getparams()
-    with wave.open(out, "wb") as w:
-        w.setparams(params)
-        for blob in blobs:
-            with wave.open(io.BytesIO(blob)) as part:
-                w.writeframes(part.readframes(part.getnframes()))
-    return out.getvalue()
+async def config() -> dict:
+    """Что нужно браузеру для звонка (без пароля)."""
+    if not configured():
+        raise PhoneError("Voximplant не настроен: нет VOXIMPLANT_ACCOUNT_ID / VOXIMPLANT_API_KEY в .env")
+    cfg = await setup()
+    if not cfg["callerid"]:
+        raise PhoneError("Нет номера, с которого звонить: арендуйте номер в Voximplant (Номера → Купить) "
+                         "или подтвердите свой (Настройки → Caller ID) и укажите его в VOXIMPLANT_CALLER_ID.")
+    return cfg
 
 
-_tts_cache: dict[tuple[str, int], bytes] = {}
-
-
-async def synthesize(text: str, voice: int | None = None) -> bytes:
-    """Текст → WAV (голос Exolve). Повторяющиеся фразы берутся из кеша."""
-    voice = voice or settings.exolve_voice
-    clean = speakable(text)
-    if not clean:
-        raise PhoneError("Пустой текст для синтеза")
-    if (clean, voice) in _tts_cache:
-        return _tts_cache[(clean, voice)]
-    blobs = []
-    for chunk in _chunks(clean):
-        data = await _post("media/v1/Synthesize", {
-            "text": chunk,
-            "voice_settings": {"lang": 1, "voice": voice, "emotion": 1, "speed": 1.1, "loudness_normalization": -19},
-        }, timeout=30)
-        if not data.get("file"):
-            raise PhoneError("Exolve не вернул аудио")
-        blobs.append(base64.b64decode(data["file"]))
-    audio = _join_wavs(blobs)
-    if len(_tts_cache) >= 64:
-        _tts_cache.pop(next(iter(_tts_cache)))
-    _tts_cache[(clean, voice)] = audio
-    return audio
+def login_hash(one_time_key: str) -> str:
+    """Хеш для Client.loginWithOneTimeKey: MD5(key + "|" + MD5(user + ":voximplant.com:" + password))."""
+    if not one_time_key or len(one_time_key) > 200:
+        raise PhoneError("Некорректный одноразовый ключ")
+    inner = hashlib.md5(f"{USER_NAME}:voximplant.com:{_user_password()}".encode()).hexdigest()
+    return hashlib.md5(f"{one_time_key}|{inner}".encode()).hexdigest()
 
 
 def status() -> dict:
-    return {"configured": configured(), "seller_phone": settings.seller_phone, "pin": bool(settings.phone_pin)}
+    return {"configured": configured(), "provider": "voximplant", "seller_phone": settings.seller_phone,
+            "pin": bool(settings.phone_pin)}
 
 
 def allowed(pin: str | None) -> bool:
-    """Звонок и синтез — только с PIN, если он задан (PHONE_PIN в .env)."""
+    """Звонок — только с PIN, если он задан (PHONE_PIN в .env)."""
     return not settings.phone_pin or secrets.compare_digest(pin or "", settings.phone_pin)
 
 
 if __name__ == "__main__":
-    import asyncio
+    import sys
 
     async def check():
-        print("Ключ:", "есть" if configured() else "нет EXOLVE_API_KEY")
-        audio = await synthesize("Здравствуйте! Проверка синтеза речи.")
-        print(f"Синтез речи: ок, {len(audio)} байт WAV")
-        try:
-            c = await credentials()
-            print(f"SIP ID: {c['username']}, определяемый номер: {c['cli'] or 'не задан'}")
-        except PhoneError as exc:
-            print("SIP ID:", exc)
+        if not configured():
+            print("Нет VOXIMPLANT_ACCOUNT_ID и VOXIMPLANT_API_KEY (или VOXIMPLANT_CREDENTIALS) в .env")
+            return 1
+        info = await api("GetAccountInfo", return_live_balance=True)
+        acc = info.get("result") or {}
+        print(f"Аккаунт: {acc.get('account_name')} (id {acc.get('account_id')}), "
+              f"баланс {acc.get('live_balance', acc.get('balance'))} {acc.get('currency', '')}")
+        cfg = await setup(force=True)
+        print(f"Приложение: {cfg['app']} (узел {cfg['node'] or 'не определён — задайте VOXIMPLANT_NODE'})")
+        print(f"Пользователь для звонков: {cfg['username']}")
+        print(f"Сценарий {SCENARIO_NAME} загружен, правило {RULE_NAME} → сценарий")
+        print(f"Голос: {cfg['voice']}, распознавание: {cfg['asr']}")
+        print(f"Номер для звонков: {cfg['callerid'] or 'НЕТ — арендуйте номер или укажите VOXIMPLANT_CALLER_ID'}")
+        return 0 if cfg["callerid"] else 2
 
-    asyncio.run(check())
+    try:
+        sys.exit(asyncio.run(check()))
+    except PhoneError as exc:
+        print("Ошибка:", exc)
+        sys.exit(1)

@@ -23,3 +23,7 @@ backend/data/*.db-*
 
 # локальные модели (Whisper и т.п.)
 models/
+
+# ключ сервисного аккаунта Voximplant (VOXIMPLANT_CREDENTIALS)
+*credentials*.json
+voximplant*.json

@@ -11,7 +11,6 @@ import math
 import time
 from dataclasses import fields
 
-import httpx
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -102,8 +101,8 @@ class ClientMessage(BaseModel):
     disliked: list[str] = []
 
 
-class SpeakRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=2000)
+class PhoneLoginRequest(BaseModel):
+    key: str = Field(min_length=1, max_length=200)
 
 
 class AuthRequest(BaseModel):
@@ -179,23 +178,23 @@ def _check_pin(request: Request):
 
 @app.get("/api/phone")
 async def phone_config(request: Request):
-    """SIP-доступ Exolve для звонка из браузера. На публичном сервере — только с PIN."""
+    """Настройки звонка через Voximplant для браузера: пользователь приложения, номер, голос — без пароля.
+    При первом вызове сервер сам создаёт приложение, сценарий и пользователя. На публичном сервере — только с PIN."""
     _check_pin(request)
     try:
-        return {**await phone.credentials(), "seller_phone": settings.seller_phone}
+        return {**await phone.config(), "seller_phone": settings.seller_phone}
     except phone.PhoneError as exc:
         raise HTTPException(503, str(exc)) from exc
 
 
-@app.post("/api/tts")
-async def text_to_speech(req: SpeakRequest, request: Request):
-    """Голос агента для телефонного звонка: текст -> WAV."""
+@app.post("/api/phone/login")
+async def phone_login(req: PhoneLoginRequest, request: Request):
+    """Хеш для входа в Voximplant по одноразовому ключу: пароль пользователя остаётся на сервере."""
     _check_pin(request)
     try:
-        audio = await phone.synthesize(req.text)
-    except (phone.PhoneError, httpx.HTTPError) as exc:
-        raise HTTPException(502, f"Синтез речи не удался: {exc}") from exc
-    return Response(audio, media_type="audio/wav")
+        return {"hash": phone.login_hash(req.key)}
+    except phone.PhoneError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 # ------------------------------------------------------------------ вход

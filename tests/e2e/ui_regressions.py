@@ -108,8 +108,7 @@ async def main(base):
           const {PhoneCall}=await import('/js/phone.js');
           const {capturePhrase,prepareRecordingAudio}=await import('/js/voice.js');
           const original=window.AudioContext;
-          const audioSession={type:'auto'};
-          Object.defineProperty(navigator,'audioSession',{configurable:true,value:audioSession});
+          const originalMedia=navigator.mediaDevices?.getUserMedia;
           const events=[];
           class FakeContext extends EventTarget {
             constructor(){ super();this.state='suspended';this.sampleRate=48000;events.push('create'); }
@@ -120,25 +119,32 @@ async def main(base):
             createMediaStreamSource(){return {connect(){},disconnect(){events.push('source-disconnect');}};}
             createBufferSource(){return {connect(){},start(){queueMicrotask(()=>this.onended?.());},stop(){this.onended?.();}};}
             decodeAudioData(){events.push('decode');return Promise.resolve({});}
-            close(){this.state='closed';return Promise.resolve();}
+            close(){this.state='closed';events.push('close');return Promise.resolve();}
           }
           window.AudioContext=FakeContext;
+          if(navigator.mediaDevices)navigator.mediaDevices.getUserMedia=async()=>{events.push('mic');throw new Error('no mic in test');};
+          // Звонок через Voximplant: говорит и слушает облако — браузер не создаёт звук и не просит микрофон
           const phone=new PhoneCall();
-          if(phone.ctx!==null)throw new Error('AudioContext created before gesture');
-          phone.connect=async()=>{events.push('connect');phone.ua={call:(number,options)=>{events.push('sip');queueMicrotask(options.eventHandlers.confirmed);return {isEnded:()=>true};},stop(){}};};
+          await phone.unlockAudio();
+          const sent=[];
+          let handlers={};
+          phone.connect=async()=>{events.push('connect');return {cfg:{callerid:'74950000000',voice:'v',asr:'a'},c:{call:(settings)=>{events.push('call');return {on:(ev,fn)=>{handlers[ev]=fn;},sendMessage:(t)=>{sent.push(JSON.parse(t));},hangup(){events.push('hangup');}};}}};};
+          window.VoxImplant={CallEvents:{Connected:'Connected',Disconnected:'Disconnected',Failed:'Failed',MessageReceived:'MessageReceived'}};
           const dial=phone.dial('79990000000');
-          if(!events.includes('resume'))throw new Error('resume deferred beyond gesture');
+          await new Promise(r=>setTimeout(r,20));
+          handlers.MessageReceived({text:JSON.stringify({type:'answered'})});
           await dial;
-          if(events.indexOf('resume')>events.indexOf('connect'))throw new Error('network before resume');
-          if(audioSession.type!=='play-and-record')throw new Error('incorrect audio session');
-          const originalFetch=window.fetch;
-          window.fetch=async()=>new Response(new ArrayBuffer(8));
-          phone.ctx.state='interrupted';phone.ctx.resume=()=>Promise.resolve();
           const speaking=phone.say('Тест');
-          await new Promise(resolve=>setTimeout(resolve,30));
-          if(events.includes('decode'))throw new Error('playing into interrupted context');
-          phone.ctx.state='running';phone.ctx.dispatchEvent(new Event('statechange'));
+          if(sent.at(-1).type!=='say'||sent.at(-1).text!=='Тест')throw new Error('реплика не ушла в облако');
+          handlers.MessageReceived({text:JSON.stringify({type:'said',id:sent.at(-1).id})});
           await speaking;
+          handlers.MessageReceived({text:JSON.stringify({type:'heard',text:'Да, продаётся'})});
+          const heard=await phone.listen();
+          if(heard.text!=='Да, продаётся')throw new Error('ответ продавца не дошёл: '+JSON.stringify(heard));
+          phone.hangup();
+          if(sent.at(-1).type!=='hangup')throw new Error('облако не узнало о конце звонка');
+          if(events.includes('create')||events.includes('mic'))throw new Error('звонок трогает звук/микрофон браузера: '+events);
+          // Микрофон для голосового режима (voice.js): запись в Safari (AAC), узлы освобождаются
           const originalRecorder=window.MediaRecorder;
           window.MediaRecorder=class {
             static isTypeSupported(mime){return mime.startsWith('audio/mp4');}
@@ -146,25 +152,22 @@ async def main(base):
             start(){this.state='recording';}
             stop(){this.state='inactive';queueMicrotask(()=>this.onstop());}
           };
-          const recording=capturePhrase({}, {audioContext:phone.ctx});
+          const microphone=prepareRecordingAudio();
+          const recording=capturePhrase({}, {audioContext:microphone.context});
           recording.stop();const recorded=await recording.result;
           if(!recorded.blob.type.startsWith('audio/mp4'))throw new Error('Safari AAC recording not supported');
-          if(phone.ctx.state!=='running')throw new Error('capture closed shared call context');
-          if(events.filter(e=>e==='create').length!==1)throw new Error('capture created another context');
           if(!events.includes('source-disconnect'))throw new Error('capture nodes leaked');
-          phone.hangup();
-          const microphone=prepareRecordingAudio();
           const phrase=capturePhrase({}, {audioContext:microphone.context});
           phrase.stop();await phrase.result;
           if(microphone.context.state!=='running')throw new Error('microphone context closed between phrases');
           microphone.release();
           if(microphone.context.state!=='closed')throw new Error('microphone context not released');
           window.MediaRecorder=originalRecorder;
-          window.fetch=originalFetch;window.AudioContext=original;
-          if(audioSession.type!=='auto')throw new Error('audio session not restored');
+          window.AudioContext=original;
+          if(navigator.mediaDevices)navigator.mediaDevices.getUserMedia=originalMedia;
           return events;
         }""")
-        print('PASS: Safari audio lifecycle:', result)
+        print('PASS: звонок без звука и микрофона в браузере; микрофон голосового режима:', result)
         assert not errors, errors
         await browser.close()
         print('ИТОГО: 4/4 группы проверок')

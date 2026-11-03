@@ -71,7 +71,7 @@ def _cyr(text: str) -> str:
 
 GIVE = r"(?:отда|дай|покаж|выве|выда|скин|пришл|сообщ|назов|раскр|перечисл|выгруз|слей|слив|напиш|распечат|достан|верн|" \
        r"отобраз|show|give|print|reveal|dump|list|tell|send|leak|export)"
-SECRET = (r"(?:логин|парол|password|passwd|token|токен|api[ -]?key|апи[ -]?ключ|ключ[а-я]* (?:api|апи|доступа|от (?:api|апи|сервис|deepseek|gigachat|exolve))|"
+SECRET = (r"(?:логин|парол|password|passwd|token|токен|api[ -]?key|апи[ -]?ключ|ключ[а-я]* (?:api|апи|доступа|от (?:api|апи|сервис|deepseek|gigachat|exolve|voximplant))|"
           r"секрет|secret|credential|креды|учетн[а-я]* (?:запис|данн)|хеш|hash|cookie|куки|сесси[а-я]* (?:других|пользовател)|"
           r"(?:баз[а-я]*|бд|таблиц[а-я]*) (?:данн|пользовател|клиент|юзер|аккаунт)|\bdatabase\b|\bбд\b|"
           r"данн[а-я]* (?:других|всех|остальных|чужих)|(?:других|всех|остальных) (?:клиент|пользовател|покупател)|"
@@ -198,7 +198,7 @@ def sanitize(value):
 LEAK_MARKERS = [CANARY, "ПРАВИЛА (нарушать нельзя)", "ОБЫЧНЫЙ ХОД (ориентир", "СОСТОЯНИЕ СДЕЛКИ", "КАК ТЫ РАБОТАЕШЬ",
                 "Контекст сессии (посчитано кодом)", "БЕЗОПАСНОСТЬ (нарушать нельзя)"]
 SECRET_OUT = re.compile(r"\bsk-[a-z0-9]{16,}|\bbearer\s+[a-z0-9._\-]{16,}|scrypt\$\d+\$|\b[a-f0-9]{48,}\b|"
-                        r"(?:deepseek_api_key|gigachat_credentials|exolve_api_key|twogis_api_key|database_url|phone_pin)\s*[=:]", re.I)
+                        r"(?:deepseek_api_key|gigachat_credentials|exolve_api_key|voximplant_api_key|voximplant_credentials|twogis_api_key|database_url|phone_pin)\s*[=:]", re.I)
 SAFE_REPLY = "Этого я сказать не могу. Давайте вернёмся к квартире — чем помочь?"
 
 
@@ -249,7 +249,7 @@ def note(s, where: str, category: str, text: str) -> None:
 def _known_secret(text: str) -> bool:
     from ..config import settings
     return any(value and len(value) >= 8 and value in text for value in
-               (settings.deepseek_api_key, settings.gigachat_credentials, settings.exolve_api_key, settings.twogis_api_key))
+               (settings.deepseek_api_key, settings.gigachat_credentials, settings.voximplant_api_key, settings.twogis_api_key))
 
 
 def output(value, s=None, *, limit=True):

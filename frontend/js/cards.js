@@ -172,10 +172,10 @@ export function confirmCard(ev) {
     collect = bindFamilyForm(card);
   }
   if (ev.kind === "call" && config.phoneReady) {
-    // регистрируемся в Exolve заранее: по клику звонок уходит сразу
+    // входим в Voximplant заранее: по клику звонок уходит сразу
     if (live) {
       if (!state.phone || state.phone.ended) state.phone = new PhoneCall();
-      state.phone.connect().catch((e) => console.warn("Exolve:", e.message));
+      state.phone.connect().catch((e) => console.warn("Voximplant:", e.message));
     }
     extra.innerHTML = html`<label class="phone-field">Ваш телефон — агент позвонит вам как продавцу
       <input type="tel" inputmode="tel" placeholder="+7 999 123-45-67" value="${storedPhone()}" data-phone autocomplete="tel"></label>`;
@@ -273,7 +273,7 @@ async function dialSeller(card, label) {
     if (button) button.hidden = audioState === "running" || audioState === "closed";
   };
   const steps = {
-    connecting: "Подключаюсь к МТС Exolve…",
+    connecting: "Подключаюсь к Voximplant…",
     dialing: `Звоню на ${formatPhone(number)}…`,
     ringing: `Звоню на ${formatPhone(number)} — возьмите трубку. Вы — продавец квартиры.`,
     answered: "Трубку взяли — агент начинает разговор.",
