@@ -87,6 +87,8 @@ class Session:
     calls: dict[str, dict] = field(default_factory=dict)     # итоги звонков по id объявления
     agreed: dict[str, int] = field(default_factory=dict)     # цена, которую клиент подтвердил
     chosen: str | None = None           # квартира, которую клиент выбрал после просмотра
+    products_offer: dict | None = None  # финансовые продукты, предложенные под выбранную квартиру
+    products_choice: dict | None = None # что клиент из них выбрал
     current: dict | None = None         # квартира, по которой идёт звонок: {"listing", "fair"}
     journal: dict = field(default_factory=dict)
     opened: dict[str, int] = field(default_factory=dict)

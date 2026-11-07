@@ -127,6 +127,33 @@ function archiveDecision(card) {
   updateDecisionLayout();
 }
 
+function productsOffer(ev) {
+  const ins = ev.insurance || {};
+  const sav = ev.savings || {};
+  const cross = ev.cross || { items: [], total: 0 };
+  const rows = [];
+  if (ins.sber_year) {
+    rows.push(html`<dt>Страхование жизни и имущества, первый год</dt><dd class="num">${rub(ins.sber_year)}</dd>`);
+    rows.push(html`<dt>То же в другом банке</dt><dd class="num">${rub(ins.market_year)}</dd>`);
+    rows.push(html`<dt>Экономия на страховке</dt><dd class="num">${rub(ins.saving)}</dd>`);
+  }
+  if (sav.product) {
+    const money = sav.mode === "gap"
+      ? `не хватает ${rub(sav.gap)} — вклад с пополнениями закроет разрыв ${sav.months ? `за ${sav.months} мес.` : `за ${sav.horizon_months} мес.`}`
+      : `деньги на взнос (${rub(sav.base)}) полежат на вкладе ${sav.horizon_months} мес.`;
+    rows.push(html`<dt>${sav.product.name} под ${pct(sav.product.rate)}</dt><dd>${money}</dd>`);
+    rows.push(html`<dt>Накопительный счёт под ${pct(sav.account.rate)}</dt><dd>доход до сделки ${rub(sav.income)}</dd>`);
+  }
+  if (cross.total) {
+    rows.push(html`<dt>Бонусы и подписки</dt><dd class="num">${rub(cross.total)}</dd>`);
+  }
+  const items = (cross.items || []).map((i) => html`<li><b>${i.name}</b> — ${rub(i.value)}<span class="hint"> · ${i.note}</span></li>`).join("");
+  return html`
+    <dl class="costs">${html.raw(rows.join(""))}</dl>
+    ${html.raw(items ? html`<ul class="checklist" style="margin-top:10px">${html.raw(items)}</ul>` : "")}
+    <p class="hint">Выгода против рынка по этому пакету — ${rub(ev.total_benefit)}. ${ev.note || ""}</p>`;
+}
+
 export function confirmCard(ev) {
   if (ev.kind === "selection") return; // решения подборки — на экране подбора
   const live = !ev.replay; // из истории — без голоса, звонка и фокуса
@@ -194,6 +221,9 @@ export function confirmCard(ev) {
       <textarea data-seller-questions rows="5" maxlength="4500">${(ev.questions || []).map(q => q.question || q.label).join('\n')}</textarea></label>`);
     collect = () => ({questions: collectQuestions(card)});
   }
+  if (ev.kind === "products") {
+    extra.innerHTML = productsOffer(ev);
+  }
 
   const buttons = {
     red_lines: [["Подтвердить рамки", true, {}], ["Изменить запрос", false, {}]],
@@ -208,6 +238,8 @@ export function confirmCard(ev) {
     price: [[`Подтвердить ${rub(ev.price)}`, true, {}], ["Отклонить, звонить дальше", false, {}]],
     object: [["Выбираю эту квартиру", true, {}], ["Ищем дальше", false, {}]],
     sign: [["Подписать электронно", true, {}], ["Отложить", false, {}]],
+    products: [["Подключить всё", true, { choice: "all" }], ["Только страхование", true, { choice: "insurance" }],
+      ["Только накопления", true, { choice: "savings" }], ["Пока не нужно", false, { choice: "none" }]],
   }[ev.kind] || [["Подтвердить", true, {}], ["Отклонить", false, {}]];
 
   // голосом: что сказать вслух и как ответить

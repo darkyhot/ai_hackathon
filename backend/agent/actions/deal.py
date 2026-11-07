@@ -9,6 +9,7 @@ from .. import criteria as C
 from .. import finance as F
 from .. import mortgage as M
 from .. import negotiation as N
+from .. import products as PR
 from .. import seller_sim
 from ..deal import client_slots, deal_plan, legal_check, viewing_checklist
 from ..features import FEATURES, missing_info
@@ -235,6 +236,67 @@ async def plan_viewing(s, listing_id: str) -> dict:
     return {"chosen": True, "viewing": slot}
 
 
+def _products_for(s, listing: dict, price: int) -> dict:
+    """Пакет финансовых продуктов под конкретную квартиру: те же входы, что у плана сделки."""
+    p = s.profile
+    cash = p.get("payment") == "cash"
+    inputs = (s.finance or {}).get("inputs") or {}
+    gap = monthly = 0
+    if inputs:  # сколько клиенту не хватает на взнос по этой цене
+        money = F.plan(price, inputs)
+        gap, monthly = money["gap"], money["monthly"]
+    down = 0 if cash else (s.finance["down_payment"] if s.finance
+                           else int(round(price * POLICY['mortgage']['default_down_share'])))
+    pay = M.listing_payment(listing, p, price=price, down_share=down / price) if down else None
+    return PR.offer(price=price, down=down, loan=max(0, price - down), rate=pay["rate"] if pay else None,
+                    years=POLICY['mortgage']['years'], gap=gap, monthly=monthly)
+
+
+@action("offer_products", 8,
+        "Финансовые продукты под квартиру, которую клиент выбрал: страхование жизни и имущества в Сбере, "
+        "вклад с выгодной ставкой и накопительный счёт (если на первый взнос не хватает), бонусы Спасибо, "
+        "СберПрайм и предложения партнёров — с выгодой против рынка. Показывает карточку выбора продуктов. "
+        "Только для квартиры, которую клиент выбрал в plan_viewing.", **ID)
+async def offer_products(s, listing_id: str) -> dict:
+    if not s.red_lines_ok:
+        raise ActionError("Рамки изменились — сначала confirm_red_lines и повторный выбор квартиры.")
+    if s.chosen != listing_id:
+        raise ActionError("Клиент ещё не выбрал эту квартиру — сначала plan_viewing.")
+    x = _listing(s, listing_id)
+    price = s.agreed.get(listing_id, x["price"])
+    data = _products_for(s, x, price)
+    s.products_offer = data
+    ins, sav, cross = data["insurance"], data["savings"], data["cross"]
+    parts = []
+    if ins["sber_year"]:
+        parts.append(f"страхование жизни и имущества — {fmt(ins['sber_year'])} в первый год вместо "
+                     f"{fmt(ins['market_year'])} в другом банке (экономия {fmt(ins['saving'])})")
+    if sav["mode"] == "gap":
+        months = f"за {sav['months']} мес." if sav["months"] else f"за {sav['horizon_months']} мес."
+        parts.append(f"до взноса не хватает {fmt(sav['gap'])}: вклад «{sav['product']['name']}» под "
+                     f"{sav['product']['rate'] * 100:g}% с пополнениями закроет разрыв {months}")
+    else:
+        parts.append(f"деньги на взнос до сделки полежат на вкладе под {sav['product']['rate'] * 100:g}% "
+                     f"или накопительном счёте {sav['account']['rate'] * 100:g}%")
+    parts.append(f"бонусы и подписки — {fmt(cross['total'])}: Спасибо, СберПрайм {PR.CROSS['prime_months']} мес. "
+                 "и предложения партнёров")
+    await s.say("Под эту квартиру собрал финансовые продукты: " + "; ".join(parts) + ".")
+    r = await s.ask("products", "Финансовые продукты",
+                    "Что из этого подключить к сделке? Страхование и накопления оформляются вместе со сделкой в Сбере.",
+                    **data)
+    if r["approved"] is None:  # клиент ответил текстом — решение принимает разбор ввода, выбор не записываем
+        return {"client_said": r["data"].get("text", ""), "total_benefit": data["total_benefit"]}
+    choice = r["data"].get("choice") or ("all" if r["approved"] else "none")
+    s.products_choice = {"choice": choice, "insurance": data["insurance"]["sber_year"],
+                         "savings": data["savings"]["income"], "cross": data["cross"]["total"]}
+    names = {"all": "всё предложенное", "insurance": "только страхование", "savings": "только накопления",
+             "none": "ничего из предложенного"}
+    await s.say(f"Записал: {names.get(choice, names['none'])}.")
+    return {"offered": [i["name"] for i in cross["items"]] + ["страхование жизни и имущества"],
+            "insurance_year": ins["sber_year"], "savings_gap": sav["gap"], "total_benefit": data["total_benefit"],
+            "client_choice": choice}
+
+
 @action("prepare_deal", 8,
         "План сделки по датам (ипотека по подходящей программе или без неё, страхование, СБР или ДДУ с эскроу, "
         "регистрация) и карточка подписания договора. После подписания — итог: экономия клиента и что получает Сбер. "
@@ -249,6 +311,10 @@ async def prepare_deal(s, listing_id: str) -> dict:
     down = None if p.get("payment") == "cash" else (s.finance["down_payment"] if s.finance else int(p["budget_max"] * POLICY['mortgage']['default_down_share']))
     pay = M.listing_payment(x, p, price=price, down_share=down / price) if down else None
     plan = deal_plan(x, price, down, rate=pay["rate"] if pay else None, program=pay["title"] if pay else None)
+    # Обслуживание в Сбере против среднего банка-конкурента: комиссии, страховки, скидка к ставке.
+    plan["sber"] = PR.compare(price, plan["loan"], plan["rate"], plan["years"])
+    plan["products"] = s.products_offer or _products_for(s, x, price)
+    plan["products_choice"] = s.products_choice
     s.push("result", step=8, kind="deal", data=plan)
     contract = ("договор уступки прав по ДДУ" if plan["assignment"]
                 else "договор участия в долевом строительстве (ДДУ)" if plan["new"] else "договор купли-продажи")
@@ -256,8 +322,11 @@ async def prepare_deal(s, listing_id: str) -> dict:
         await s.say("Собрал план сделки без ипотеки: проверка продавца, договор с электронной подписью, "
                     "деньги через сервис безопасных расчётов, электронная регистрация.")
     else:
+        sber = plan["sber"]
         await s.say(f"Собрал план сделки: {plan['program'].lower()} {fmt(plan['loan'])}, платёж {fmt(plan['monthly'])} в месяц "
-                    f"(на {fmt(plan['monthly_saved'])} меньше благодаря торгу).")
+                    f"(на {fmt(plan['monthly_saved'])} меньше благодаря торгу). В Сбере обслуживание дешевле рынка: "
+                    f"оформление — на {fmt(sber['paperwork']['saving'])}, страхование — на {fmt(sber['insurance']['saving'])}, "
+                    f"платёж ниже на {fmt(sber['payment']['saving_month'])} в месяц.")
     r = await s.ask("sign", "Подписание договора", f"Подписать {contract} электронной подписью?")
     if not r["approved"]:
         return {"signed": False, "client_said": r["data"].get("text")}
@@ -273,7 +342,8 @@ async def prepare_deal(s, listing_id: str) -> dict:
         "net": round(max(0, savings) * (1 - POLICY['economics']['fee_pct'])),
         "monthly_saved": plan["monthly_saved"], "hours_saved": "60–70 ч",
         "sber": {"revenue": econ["revenue"], "contribution": econ["contribution"], "lines": econ["lines"],
-                 "finance": fin_lines, "finance_total": sum(v["value"] for v in fin_lines)},
+                 "finance": fin_lines, "finance_total": sum(v["value"] for v in fin_lines),
+                 "package": plan["sber"], "products_choice": plan["products_choice"]},
         "next_events": ["Ремонт и обустройство", "Переезд", "Страхование на следующий год", "Рефинансирование"],
     }
     await s.step(9)

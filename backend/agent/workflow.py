@@ -52,6 +52,7 @@ def available(s, name: str) -> bool:
         "call_seller": s.search is not None and search_ready and bool(s.shown) and bool(s.call_targets) and not s.selection_profile_stale,
         "confirm_price": bool(s.calls) and s.red_lines_ok,
         "plan_viewing": bool(s.agreed) and s.red_lines_ok,
+        "offer_products": bool(s.chosen) and s.red_lines_ok and s.status.get(8) != "done",
         "prepare_deal": bool(s.chosen)
         and s.red_lines_ok
         and finance_ready

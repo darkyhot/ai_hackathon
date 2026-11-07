@@ -30,7 +30,13 @@ def render():
     return text
 
 
+def write_preserving_newlines(path, text):
+    """Не менять переводы строк файла: на Windows запись в текстовом режиме делает CRLF."""
+    newline = "\r\n" if b"\r\n" in path.read_bytes()[:4000] else "\n"
+    path.write_text(text, encoding="utf-8", newline=newline)
+
+
 if __name__=='__main__':
     path=ROOT/'index.html'
     updated=render()
-    if updated!=path.read_text():path.write_text(updated)
+    if updated!=path.read_text(encoding="utf-8"):write_preserving_newlines(path,updated)

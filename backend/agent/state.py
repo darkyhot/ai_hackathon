@@ -6,6 +6,7 @@ FIELDS = ('profile','messages','status','voice_mode','red_lines_ok','market','fi
           'programs_key','programs_result','search','shown','selection_query','selection_scope_ids',
           'selection_dirty','selection_operation','selection_profile_stale','last_issue','call_targets',
           'calls','agreed','chosen','current','journal','opened','map_warned','stage',
+          'products_offer','products_choice',
           'request_inputs','request_review_seq','request_review','request_intent','requested_action',
           'client_revision','profile_revision','selection_revision','pending_decisions','operations',
           'active_operation','qa_pending','started','query')

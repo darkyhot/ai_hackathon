@@ -340,6 +340,59 @@ export function viewing(v) {
   </section>`;
 }
 
+function productsSummary(d) {
+  const pr = d.products;
+  if (!pr || d.products_choice) return "";
+  const ins = pr.insurance || {};
+  const sav = pr.savings || {};
+  const rows = [];
+  if (ins.sber_year) rows.push(html`<dt>Страхование в Сбере</dt><dd class="num">${rub(ins.sber_year)} / год вместо ${rub(ins.market_year)}</dd>`);
+  if (sav.product) rows.push(html`<dt>${sav.product.name}</dt><dd class="num">${pct(sav.product.rate)}</dd>`);
+  if (pr.cross) rows.push(html`<dt>Бонусы и подписки</dt><dd class="num">${rub(pr.cross.total)}</dd>`);
+  return html`
+  <section class="panel">
+    <h2 class="panel-title">Финансовые продукты под квартиру</h2>
+    <p class="panel-lead">Собрано под эту сделку. Подключить можно вместе с оформлением — скажите, что из этого нужно.</p>
+    <dl class="costs">${html.raw(rows.join(""))}</dl>
+  </section>`;
+}
+
+function sberPackage(x) {
+  if (!x) return "";
+  const doc = x.paperwork || {};
+  const ins = x.insurance || {};
+  const rows = [];
+  if (x.rate) {
+    rows.push(html`<dt>Ставка: Сбер / банк-конкурент</dt><dd class="num">${pct(x.rate.sber, 2)} / ${pct(x.rate.market, 2)}</dd>`);
+    rows.push(html`<dt>Платёж в месяц</dt><dd class="num">${rub(x.payment.sber)} / ${rub(x.payment.market)}</dd>`);
+  }
+  rows.push(html`<dt>Оформление сделки</dt><dd class="num">${rub(doc.sber_total)} / ${rub(doc.market_total)}</dd>`);
+  rows.push(html`<dt>Страхование, первый год</dt><dd class="num">${rub(ins.sber_year)} / ${rub(ins.market_year)}</dd>`);
+  const discounts = (x.rate && x.rate.discounts || []).map((d) => `${d.name.toLowerCase()} −${pct(d.value, 1)}`).join(", ");
+  return html`
+  <section class="panel">
+    <h2 class="panel-title">Обслуживание в Сбере</h2>
+    <p class="panel-lead">${x.note || ""}</p>
+    <div class="two-col">
+      <div>
+        <h3 class="sub">Условия: Сбер и банк-конкурент</h3>
+        <dl class="costs">${html.raw(rows.join(""))}</dl>
+        ${html.raw(discounts ? html`<p class="hint">Скидки к ставке: ${discounts}.</p>` : "")}
+        ${html.raw(x.payment ? html`<p class="hint">Платёж ниже на ${rub(x.payment.saving_month)} в месяц — ${rub(x.payment.saving_year)} за первый год.</p>` : "")}
+      </div>
+      <div>
+        <h3 class="sub">Сколько клиент экономит с Сбером</h3>
+        <dl class="costs">
+          <dt>Оформление сделки и регистрация</dt><dd class="num">${rub(doc.saving)}</dd>
+          <dt>Страхование за первый год</dt><dd class="num">${rub(ins.saving)}</dd>
+          ${html.raw(x.interest ? html`<dt>Платежи по кредиту за ${x.years} лет</dt><dd class="num">${rub(x.interest.saving)}</dd>` : "")}
+          <dt class="total">Итого против банка-конкурента</dt><dd class="total num">${rub(x.total_saving)}</dd>
+        </dl>
+      </div>
+    </div>
+  </section>`;
+}
+
 export function deal(d) {
   const costs = Object.entries(d.costs).map(([k, v]) => html`<dt>${k}</dt><dd class="num">${rub(v)}</dd>`).join("");
   return html`
@@ -352,7 +405,9 @@ export function deal(d) {
       </ol>
       <div><h3 class="sub">Расходы на сделку</h3><dl class="costs">${html.raw(costs)}</dl></div>
     </div>
-  </section>`;
+  </section>
+  ${html.raw(productsSummary(d))}
+  ${html.raw(sberPackage(d.sber))}`;
 }
 
 export function summary(s) {

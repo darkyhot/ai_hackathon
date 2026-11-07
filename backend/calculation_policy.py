@@ -85,6 +85,33 @@ def validate(policy):
     for year, factor in pricing["year"]:
         number(year, 0, 2100)
         number(factor, 0.1, 3)
+    products = policy["products"]
+    for section in ("sber", "market"):
+        for key, value in products[section].items():
+            if key == "discounts" or key == "promo_deposit":
+                continue
+            number(value, -1, 1e9)
+    discounts = products["sber"]["discounts"]
+    if not discounts or not math.isclose(
+        sum(value for _, value in discounts), products["market"]["rate_spread"], abs_tol=1e-9
+    ):
+        raise ValueError("Скидки Сбера должны объяснять разницу со ставкой рынка")
+    for _, value in discounts:
+        number(value, 0.0001, 0.2)
+    deposit = products["sber"]["promo_deposit"]
+    number(deposit["rate"], 0.001, 1)
+    number(deposit["term_months"], 1, 60)
+    if not deposit["name"]:
+        raise ValueError("Нужно название вклада")
+    for key in ("spasibo_welcome", "spasibo_cashback", "prime_months", "prime_month_price"):
+        number(products["cross"][key], 0, 1e9)
+    for partner in products["cross"]["partners"]:
+        if not partner.get("name") or not partner.get("note"):
+            raise ValueError("У партнёрского предложения нужны название и описание")
+        number(partner["value"], 0, 1e9)
+    if not products.get("note"):
+        raise ValueError("У продуктов нужна оговорка о демо-допущениях")
+
     comparables = pricing["comparables"]
     for key, value in comparables.items():
         number(value, 0.001, 1000)

@@ -65,6 +65,7 @@ CONFIRMATIONS = {
     "finance": {"monthly_income": number(), "monthly_expenses": number(), "savings": number(),
                 "horizon_months": number(1, 600), "risk": choice("conservative", "moderate", "aggressive")},
     "selection": {"action": choice("proceed", "more", "text"), "liked": IDS, "disliked": IDS},
+    "products": {"choice": choice("all", "insurance", "savings", "none")},
 }
 
 
