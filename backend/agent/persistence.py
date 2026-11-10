@@ -31,11 +31,16 @@ def commit(s, events=(), command=None):
     del s.history[:-settings.history_memory_events]
 
 
+LIVE_CALL_EVENTS=('turn','await_seller','price','guard')
+
+
 def push(s, type_, payload):
     if s._owner is not None:
         if s._replaying_operation and type_!='confirm':return {'type':type_,**payload,'seq':0,'replay':True}
         s._event_buffer.append({'type':type_,**payload})
-        if type_=='search_progress' or type_.startswith('call_'):
+        # Живой звонок: реплику агента браузер озвучивает в линию, а на await_seller
+        # начинает слушать продавца. В буфере они ждали бы конца звонка — агент молчал.
+        if type_=='search_progress' or type_.startswith('call_') or type_ in LIVE_CALL_EVENTS:
             s.flush()
         return {'type':type_,**payload,'seq':s._owner.seq+len(s._event_buffer)}
     ev={'type':type_,**payload,'seq':s.seq+len(s._event_buffer)+1,
