@@ -2,7 +2,7 @@
 import hashlib
 import secrets
 from datetime import timedelta
-from sqlalchemy import select,func
+from sqlalchemy import select
 from . import db
 from .db.models import PhoneGrant,Chat,utcnow
 from .config import settings
@@ -25,8 +25,6 @@ def reserve(connection,s,who,decision):
                      or (existing.status=='issued' and existing.expires_at>utcnow())):
         # Разговор состоялся (итог уже у агента) или звонок ещё идёт в другой вкладке.
         return {'error':'Это разрешение уже использовано. Проверьте исход звонка перед новым разрешением.','status':409}
-    used=connection.scalar(select(func.count()).select_from(PhoneGrant).where(PhoneGrant.actor==who,PhoneGrant.created_at>=utcnow()-timedelta(hours=1)))
-    if used>=settings.phone_calls_per_hour:return {'error':'Лимит телефонных операций за час исчерпан.','status':429}
     secret=secrets.token_urlsafe(32);expires=utcnow()+timedelta(seconds=settings.phone_call_max_seconds+60)
     if existing:
         # Прошлый вызов не дошёл до разговора (не взяли трубку, занято, сбой сети) — карточка ждёт решения,
