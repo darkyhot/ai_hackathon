@@ -80,7 +80,7 @@ class WorkshopAPI(unittest.TestCase):
         other=r.json()['user']['id']
         with db.session() as s:s.get(User,other).premium=True
         me=self.client.get('/api/me').json()['user']
-        self.assertFalse(me['premium'],'Премиум (телефон оператора) — только у выданного аккаунта')
+        self.assertFalse(me['premium'],'Премиум-метка — только у выданного аккаунта')
         self.assertTrue(me['workshop'])
         response=self.client.get('/api/workshop/context')
         self.assertEqual(response.status_code,200,response.text)
@@ -97,6 +97,11 @@ class WorkshopAPI(unittest.TestCase):
             self.client.post('/api/auth/logout')
             self.assertFalse(self.client.get('/api/health').json()['phone']['ready'])
             self.assertEqual(self.client.post('/api/phone',json={'chat_id':'own','decision_id':'not-pending','destination':'79991234567'}).status_code,403)
+            self.client.post('/api/auth/register',json={'email':'caller@example.ru','password':'workshop-test-123'})
+            self.assertFalse(self.client.get('/api/me').json()['user']['premium'])
+            self.assertTrue(self.client.get('/api/health').json()['phone']['ready'],'Звонок на телефон — любому вошедшему')
+            response=self.client.post('/api/phone',json={'chat_id':'own','decision_id':'not-pending','destination':'79991234567'})
+            self.assertNotEqual(response.status_code,403,response.text)
 
     def test_favorites_and_math_come_from_owned_chat_without_uploads(self):
         context=self.client.get('/api/workshop/context?chat_id=own').json()
