@@ -11,6 +11,7 @@ from .. import mortgage as M
 from .. import negotiation as N
 from .. import products as PR
 from .. import seller_sim
+from ..profile import payment_confirmed
 from ..deal import client_slots, deal_plan, legal_check, viewing_checklist
 from ..features import FEATURES, missing_info
 from ..numbers import fmt
@@ -80,7 +81,7 @@ async def call_seller(s, listing_id: str) -> dict:
     spent=(s.profile.get('_call_authorizations') or {}).get(listing_id) or {}
     if spent.get('authorization')==authorization:
         raise ActionError('Это разрешение на звонок уже использовано. Сначала проверьте итог или получите новую явную просьбу клиента.')
-    if not s.profile.get("payment"):
+    if not payment_confirmed(s.profile):
         raise ActionError("Сначала выясни способ покупки — ask_payment, затем звонок продавцу.")
     if not s.red_lines_ok:
         raise ActionError("Рамки не подтверждены — сначала confirm_red_lines.")

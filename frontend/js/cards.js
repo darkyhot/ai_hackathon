@@ -410,8 +410,10 @@ export function confirmCard(ev) {
   }[ev.kind]?.() ?? `${ev.title}. ${ev.text}`;
   if (live) sayPrompt(`${spoken} ${hint}`);
 
+  // догадку модели («из сообщения понял: наличными») подсвечиваем, но решает клиент
+  const primary = Math.max(0, buttons.findIndex(([, , data]) => ev.suggested && data.payment === ev.suggested));
   buttons.forEach(([label, approved, data], i) => {
-    const b = el(html`<button class="btn ${i === 0 ? "btn-primary" : "btn-ghost"} btn-small">${label}</button>`);
+    const b = el(html`<button class="btn ${i === primary ? "btn-primary" : "btn-ghost"} btn-small">${label}</button>`);
     b.addEventListener("click", () => {
       if (data.mode === "phone") return dialSeller(card, label);
       if (ev.kind === "call" && state.phone) { state.phone.hangup(); state.phone = null; } // заготовленный звонок не нужен
@@ -421,7 +423,7 @@ export function confirmCard(ev) {
   });
   presentDecision(card, live);
   if (!live) return;
-  actions.querySelector("button")?.focus({ preventScroll: true });
+  (actions.querySelector(".btn-primary") || actions.querySelector("button"))?.focus({ preventScroll: true });
 }
 
 /** Клиент решил (событие resolved): карточка закрывается с подписью решения. */

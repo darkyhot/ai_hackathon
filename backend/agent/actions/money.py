@@ -54,13 +54,23 @@ def _finance_panel(s) -> None:
     s.push("result", step=2, kind="finance", data=data)
 
 
+PAYMENT_GUESS = {"cash": "наличными", "mortgage_ready": "в ипотеку и взнос уже есть",
+                 "mortgage_saving": "в ипотеку, а на взнос ещё копите"}
+
+
 @action("ask_payment", 2, "Карточка: как клиент покупает — наличными, ипотека и взнос есть, или ипотека, а взнос ещё копит.")
 async def ask_payment(s) -> dict:
-    r = await s.ask("payment", "Как планируете покупать?",
-                    "От этого зависит, что посчитать: ипотеку, план накопления на взнос — или ничего.")
+    guess = s.profile.get("payment")
+    text = ("От этого зависит, что посчитать: ипотеку, план накопления на взнос — или ничего."
+            if guess not in PAYMENT_GUESS else
+            f"Из сообщения понял, что вы покупаете {PAYMENT_GUESS[guess]}. Подтвердите или выберите другое — "
+            "от этого зависит, что посчитать до звонка продавцу.")
+    s.profile["_payment_asked"] = True  # текстовый ответ на эту карточку — уже решение клиента
+    r = await s.ask("payment", "Как планируете покупать?", text, suggested=guess)
     if r["approved"] is None:
         return {"client_said": r["data"].get("text", "")}
-    _set(s, payment=r["data"].get("payment", "mortgage_ready"))
+    s.profile.pop("_payment_asked", None)
+    _set(s, payment=r["data"].get("payment", "mortgage_ready"), _payment_confirmed=True)
     return {"payment": s.profile["payment"]}
 
 
