@@ -137,6 +137,11 @@ def merge_profile(raw: dict, base: dict | None = None) -> dict:
     return p
 
 
+def payment_confirmed(p: dict) -> bool:
+    """Способ оплаты подтверждён клиентом. Догадка модели по свободному тексту — только подсказка для карточки."""
+    return bool(p.get("payment")) and p.get("_payment_confirmed") is not False
+
+
 def missing_required(p: dict) -> list[str]:
     return [k for k in REQUIRED if p.get(k) in (None, "")]
 

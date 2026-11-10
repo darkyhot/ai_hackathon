@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 from . import finance, products
-from .profile import missing_required,missing_search
+from .profile import missing_required,missing_search,payment_confirmed
 
 CORE_FIELDS=frozenset(('city','rooms','budget_max','budget_min','okrug','housing','rooms_options','cities','districts','prefer_center','center_required'))
 FILTER_FIELDS=frozenset(('features','poi','kitchen_min','area_min','not_first_floor','not_last_floor','apartments',
@@ -36,7 +36,7 @@ POLICIES={
     'offer_search_alternatives':Policy(('search',)),
     'probe_budget':Policy(('search','budget_known'),units=(('budget_max','RUB'),)),
     'financing_choice':Policy(('fork_needed',)),
-    'call_seller':Policy(('search','search_scope','shown','call_consent','fresh_selection','budget_known','limit','payment','financing_reviewed','fork_resolved'),units=(('listing_id','listing_id'),)),
+    'call_seller':Policy(('search','search_scope','shown','call_consent','fresh_selection','budget_known','limit','payment','payment_confirmed','financing_reviewed','fork_resolved'),units=(('listing_id','listing_id'),)),
     'confirm_price':Policy(('calls','limit'),units=(('listing_id','listing_id'),)),
     'plan_viewing':Policy(('agreed','limit'),units=(('listing_id','listing_id'),)),
     'offer_products':Policy(('chosen','limit','finance_ready','deal_money_known','products_needed'),units=(('listing_id','listing_id'),)),
@@ -54,7 +54,8 @@ REASONS={
     'family_needed':'Сведения о семье уже известны либо оплата своими средствами.',
     'deposit_answered':'Сначала ask_deposit: нужна сумма первоначального взноса или решение отложить расчёт.',
     'housing_needed':'Рынок жилья уже известен.', 'programs_needed':'Расчёт программ уже актуален.',
-    'payment':'Сначала уточните способ оплаты.', 'family_or_cash':'Для ипотечного расчёта нужны сведения о семье.',
+    'payment':'Сначала уточните способ оплаты.',
+    'payment_confirmed':'Способ оплаты угадан из текста — перед звонком подтвердите его карточкой ask_payment.', 'family_or_cash':'Для ипотечного расчёта нужны сведения о семье.',
     'saving_payment':'План накоплений нужен при накоплении взноса.', 'search_ready':'Для поиска нужны профиль, подтверждённый лимит и способ оплаты.',
     'selection_source':'Сначала получите объявления или восстановите показанную подборку.',
     'search':'Сначала выполните поиск.', 'shown':'Сначала покажите квартиры покупателю.',
@@ -112,7 +113,8 @@ def decision(s,name):
              bool(guidance.next_step(s) and guidance.next_step(s)[0]=='followup')),
         'city_rooms':bool(p.get('city') and p.get('rooms') is not None),
         'profile_ready':ready,'limit_needed':not s.red_lines_ok or s.requested_action=='confirm_red_lines',
-        'payment_needed':not p.get('payment') or s.requested_action=='ask_payment',
+        'payment_needed':not payment_confirmed(p) or s.requested_action=='ask_payment',
+        'payment_confirmed':payment_confirmed(p),
         'family_needed':(p.get('payment')!='cash' and (p.get('children') is None
                           or (p.get('children') or 0) > 0 and p.get('matcap') is None))
                          or s.requested_action=='ask_family',

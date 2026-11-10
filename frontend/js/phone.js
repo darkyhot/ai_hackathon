@@ -21,6 +21,9 @@ const FAIL = {
 };
 
 
+// Здесь ответ однозначный — повтор не поможет.
+const NO_RETRY = new Set(["Busy", "Rejected", "Not Found", "Address Incomplete", "Canceled", "Forbidden", "Authentication Error"]);
+
 function pinGet() { try { return localStorage.getItem("phonePin") || ""; } catch { return ""; } }
 function pinSet(v) { try { if (v) localStorage.setItem("phonePin", v); else localStorage.removeItem("phonePin"); } catch { /* приватный режим */ } }
 const pinHeaders = () => (pinGet() ? { "X-Phone-Pin": pinGet() } : {});
@@ -90,6 +93,9 @@ export class PhoneCall {
     this.capture = null;
     this.fillers = [];
     this.fillerNo = 0;
+    this.attempt = 1;
+    this.ringing = false;  // пошли гудки: вызов дошёл до телефонной сети
+    this.failure = null;   // причина срыва — уходит на сервер вместе с закрытием разрешения
   }
 
   /** Вызывается синхронно из click: до запросов, регистрации SIP и любых await. */
@@ -157,13 +163,22 @@ export class PhoneCall {
       extra_headers: [`XGRemoteIP: ${ip}`],
     });
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Сервер Exolve не ответил за 15 секунд.")), 15000);
+      const timer = setTimeout(() => {
+        const error = new Error("Сервер Exolve не ответил за 15 секунд.");
+        error.retry = true;
+        this.failure = { stage: "register", cause: "timeout", attempt: this.attempt };
+        reject(error);
+      }, 15000);
       this.ua.on("registered", () => { clearTimeout(timer); resolve(); });
       this.ua.on("registrationFailed", (e) => {
         clearTimeout(timer);
-        reject(new Error(e.cause === JsSIP.C.causes.AUTHENTICATION_ERROR
-          ? "Exolve не принял логин и пароль SIP ID."
-          : `Не удалось подключиться к Exolve: ${FAIL[e.cause] || e.cause}`));
+        const auth = e.cause === JsSIP.C.causes.AUTHENTICATION_ERROR;
+        const error = new Error(auth ? "Exolve не принял логин и пароль SIP ID."
+          : `Не удалось подключиться к Exolve: ${FAIL[e.cause] || e.cause}`);
+        error.retry = !auth;
+        this.failure = { stage: "register", cause: e.cause, attempt: this.attempt,
+          code: e.response?.status_code ?? null, reason: e.response?.reason_phrase ?? null };
+        reject(error);
       });
       this.ua.start();
     });
@@ -184,6 +199,7 @@ export class PhoneCall {
       if (this.configuration.destination !== number) throw new Error("Разрешён другой номер.");
       if (this.ended) throw new Error("Звонок отменён.");
     } catch (e) {
+      this.failure ??= { stage: "connect", reason: e.message, attempt: this.attempt };
       this.hangup();
       throw e;
     }
@@ -209,12 +225,17 @@ export class PhoneCall {
             iceTimer ??= setTimeout(() => { mark("адреса собраны по таймеру"); e.ready(); }, 1000);
           },
           sending: () => mark("вызов отправлен"),
-          progress: () => { mark("идут гудки"); onState("ringing"); },
+          progress: () => { mark("идут гудки"); this.ringing = true; onState("ringing"); },
           confirmed: () => { mark("трубку взяли"); onState("answered"); resolve(); },
           failed: (e) => {
             clearTimeout(iceTimer);
+            this.failure = { stage: this.ringing ? "ringing" : "setup", cause: e.cause, attempt: this.attempt,
+              code: e.message?.status_code ?? null, reason: e.message?.reason_phrase ?? null };
             this.hangup();
-            reject(new Error(FAIL[e.cause] || `Звонок не прошёл: ${e.cause}`));
+            const error = new Error(FAIL[e.cause] || `Звонок не прошёл: ${e.cause}`);
+            // Exolve отбил вызов до гудков (в его истории звонка нет) — номер тут ни при чём, стоит повторить.
+            error.retry = !this.ringing && !NO_RETRY.has(e.cause);
+            reject(error);
           },
           ended: () => { this.hangup(); this.onEnded(); },
         },
@@ -297,7 +318,8 @@ export class PhoneCall {
   hangup() {
     clearTimeout(this.durationTimer);
     if (this.configuration?.grant_token) {
-      fetch('/api/phone/close',{method:'POST',headers:{'X-Phone-Grant':this.configuration.grant_token},keepalive:true}).catch(() => {});
+      fetch('/api/phone/close',{method:'POST',headers:{'X-Phone-Grant':this.configuration.grant_token,'Content-Type':'application/json'},
+        body:JSON.stringify(this.failure || {}),keepalive:true}).catch(() => {});
       this.configuration.grant_token = null;
     }
     if (this.ended) return;

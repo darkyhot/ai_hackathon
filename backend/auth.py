@@ -108,7 +108,7 @@ def visitor_id(request: Request) -> str | None:
 def public(u: User | None) -> dict | None:
     return {"id": u.id, "email": u.email, "name": u.name,
             'premium':bool(u.premium and u.email.casefold()==settings.workshop_email),
-            'workshop':True} if u else None  # мастерская открыта всем вошедшим; премиум — только телефон оператора
+            'workshop':True,'phone':bool(u.phone_allowed)} if u else None  # мастерская — всем вошедшим; телефон — по ручному допуску
 
 
 def _start(s: Session, user: User, request: Request, response: Response) -> dict:

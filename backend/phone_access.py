@@ -2,7 +2,7 @@
 import hashlib
 import secrets
 from datetime import timedelta
-from sqlalchemy import select,func
+from sqlalchemy import select
 from . import db
 from .db.models import PhoneGrant,Chat,utcnow
 from .config import settings
@@ -21,13 +21,23 @@ def reserve(connection,s,who,decision):
             or operation.get('name')!='call_seller' or listing.get('id') not in s.call_targets):
         return {'error':'Нет актуального разрешения звонить по выбранной квартире.','status':409}
     existing=connection.scalar(select(PhoneGrant).where(PhoneGrant.chat_id==s.id,PhoneGrant.decision_id==decision))
-    if existing:return {'error':'Это разрешение уже использовано. Проверьте исход звонка перед новым разрешением.','status':409}
-    used=connection.scalar(select(func.count()).select_from(PhoneGrant).where(PhoneGrant.actor==who,PhoneGrant.created_at>=utcnow()-timedelta(hours=1)))
-    if used>=settings.phone_calls_per_hour:return {'error':'Лимит телефонных операций за час исчерпан.','status':429}
-    identifier=secrets.token_hex(16);secret=secrets.token_urlsafe(32)
+    if existing and (existing.status in ('connected','ended') or existing.actor!=who
+                     or (existing.status=='issued' and existing.expires_at>utcnow())):
+        # Разговор состоялся (итог уже у агента) или звонок ещё идёт в другой вкладке.
+        return {'error':'Это разрешение уже использовано. Проверьте исход звонка перед новым разрешением.','status':409}
+    secret=secrets.token_urlsafe(32);expires=utcnow()+timedelta(seconds=settings.phone_call_max_seconds+60)
+    if existing:
+        # Прошлый вызов не дошёл до разговора (не взяли трубку, занято, сбой сети) — карточка ждёт решения,
+        # поэтому тот же звонок можно повторить. Старый токен перестаёт действовать; лимит синтеза общий.
+        existing.token_hash=hashlib.sha256(secret.encode()).hexdigest();existing.status='issued'
+        existing.operation_id=operation['id'];existing.listing_id=listing['id']
+        existing.created_at=utcnow();existing.expires_at=expires
+        connection.flush()
+        return {'id':existing.id,'token':existing.id+'.'+secret,'listing_id':listing['id']}
+    identifier=secrets.token_hex(16)
     row=PhoneGrant(id=identifier,chat_id=s.id,actor=who,operation_id=operation['id'],listing_id=listing['id'],
         decision_id=decision,token_hash=hashlib.sha256(secret.encode()).hexdigest(),status='issued',tts_chars=0,
-        expires_at=utcnow()+timedelta(seconds=settings.phone_call_max_seconds+60))
+        expires_at=expires)
     connection.add(row);connection.flush()
     return {'id':identifier,'token':identifier+'.'+secret,'listing_id':listing['id']}
 
@@ -66,5 +76,5 @@ def charge_tts(connection,token,who,characters):
 
 def close(connection,token,who):
     row=lookup(connection,token,who)
-    if row:row.status='closed'
+    if row:row.status='ended' if row.status in ('connected','ended') else 'closed'  # ended — разговор был
     return bool(row)

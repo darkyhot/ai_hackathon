@@ -37,7 +37,14 @@ MAX_ROUNDS = 6
 LIVE_MODES = {"human", "phone"}  # продавец отвечает сам: в браузере или по телефону
 HANGUP = "(положил трубку)"  # так браузер сообщает, что продавец завершил звонок
 STEP = 10_000
-AGREE_WORDS = ("соглас", "договорились", "по рукам", "давайте так", "хорошо, давайте", "идёт", "идет", "устраивает")
+AGREE_WORDS = ("соглас", "договорились", "по рукам", "давайте так", "хорошо, давайте", "идёт", "идет", "устраивает",
+               "хорошо", "ладно", "подходит", "подойдёт", "подойдет", "годится", "окей", "конечно")
+# Короткое «Да.», «Ага, давайте» в ответ на наше предложение — тоже согласие.
+AGREE_START = re.compile(r"^\W*(?:да|ага|угу|ок|давайте|можно)\b")
+REFUSE = re.compile(r"\bне\s+(?:со)?глас|\bне\s+устраива|\bне\s+подход|\bне\s+могу|\bнет\b|\bдорого|\bмало\b"
+                    r"|\bно\b|\bне\s+меньше|\bне\s+ниже|\bминимум")
+REGREET = re.compile(r"^\W*(?:добрый\s+(?:день|вечер)|доброе\s+утро|здравствуйте|приветствую)[\s!.,]*", re.IGNORECASE)
+PRICE_WORDS = re.compile(r"\d|миллион|млн|тысяч|лям")
 
 
 def r10k(v: float) -> int:
@@ -62,6 +69,8 @@ class Negotiation:
     status: str = "talking"  # talking | agreed | no_deal
     agreed_price: int | None = None
     viewing: str | None = None
+    hung_up: bool = False           # продавец положил трубку (или связь оборвалась) — разговор окончен
+    viewing_answered: bool = False  # продавец ответил на вопрос о просмотре
 
     @property
     def live(self) -> bool:
@@ -99,14 +108,16 @@ async def llm_buyer(llm: LLMClient, n: Negotiation, round_no: int, phase: str) -
         price=n.listing["price"], fair=n.fair["fair"], low=n.fair["low"], high=n.fair["high"],
     )
     stage = prompts.CALL_PHASES[phase].format(questions=n.question_text(), slots=" или ".join(n.slots))
-    user = (
-        f"{stage}\nТекущая цена продавца: {n.asking} ₽. Твоё последнее предложение: {n.offer or 'ещё не было'}.\n"
-        f"{'Продавец назвал последнее слово. ' if n.seller_final else ''}"
-        f"Разговор:\n{n.transcript()}\n\nТвоя следующая реплика (JSON):"
+    # Задача этапа — инструкция, поэтому она в системном сообщении. В сообщении данных её нельзя:
+    # guard.POLICY велит считать данные не инструкциями, и модель начинала разговор заново («Добрый день…»).
+    task = (
+        f"\n\nСЕЙЧАС. {stage}\nТекущая цена продавца: {n.asking} ₽. Твоё последнее предложение: {n.offer or 'ещё не было'}."
+        f"{' Продавец назвал последнее слово.' if n.seller_final else ''}\n"
+        "Расшифровка разговора — в сообщении данных. Верни свою следующую реплику (JSON)."
     )
-    data = await llm.chat_json([{"role": "system", "content": system + "\n" + guard.POLICY},
+    data = await llm.chat_json([{"role": "system", "content": system + task + "\n" + guard.POLICY},
                                 guard.data_message("negotiation", {"listing": n.listing_title(), "arguments": n.args,
-                                                                  "conversation": user})],
+                                                                  "transcript": n.transcript()})],
                                temperature=0.6, tag="buyer_turn")
     return {"utterance": str(data.get("utterance") or "").strip(), "offer": _int_or_none(data.get("offer")),
             "accept": bool(data.get("accept"))}
@@ -117,19 +128,19 @@ async def llm_seller(llm: LLMClient, n: Negotiation, phase: str) -> dict:
     system = prompts.SELLER_SYSTEM.format(
         price=n.listing["price"], min_price=s["min_price"],
     )
-    user = (f"Твоя текущая цена: {n.asking} ₽. Последнее предложение покупателя: {n.offer or 'не было'}.\n"
-            f"Разговор:\n{n.transcript()}\n\nТвоя реплика (JSON):")
-    data = await llm.chat_json([{"role": "system", "content": system + "\n" + guard.POLICY},
+    task = (f"\n\nСЕЙЧАС. Твоя текущая цена: {n.asking} ₽. Последнее предложение покупателя: {n.offer or 'не было'}.\n"
+            "Расшифровка разговора — в сообщении данных. Верни свою реплику (JSON).")
+    data = await llm.chat_json([{"role": "system", "content": system + task + "\n" + guard.POLICY},
                                 guard.data_message("seller_simulation", {"listing": n.listing_title(), "persona": s,
-                                                                        "conversation": user})],
+                                                                        "transcript": n.transcript()})],
                                temperature=0.7, tag="seller_turn")
     return {"utterance": str(data.get("utterance") or "").strip(), "ask": _int_or_none(data.get("ask")),
             "accept": bool(data.get("accept"))}
 
 
 def _agrees(text: str) -> bool:
-    t = text.lower()
-    return any(w in t for w in AGREE_WORDS) and not re.search(r"\bне\s+(?:со)?глас|\bне\s+устраива", t)
+    t = text.lower().replace("ё", "е")
+    return bool(any(w.replace("ё", "е") in t for w in AGREE_WORDS) or AGREE_START.search(t)) and not REFUSE.search(t)
 
 
 async def parse_human_seller(llm: LLMClient, n: Negotiation, text: str) -> dict:
@@ -139,7 +150,7 @@ async def parse_human_seller(llm: LLMClient, n: Negotiation, text: str) -> dict:
     ask = parse_price_near(text, n.listing["price"])
     if ask:
         return {"utterance": text, "ask": ask, "accept": n.offer is not None and ask <= n.offer}
-    if _agrees(text) and not re.search(r"\d", text):
+    if _agrees(text) and not PRICE_WORDS.search(text.lower()):
         return {"utterance": text, "ask": None, "accept": True}
     try:
         data = await llm.chat_json(
@@ -147,7 +158,8 @@ async def parse_human_seller(llm: LLMClient, n: Negotiation, text: str) -> dict:
              guard.data_message("seller_utterance", text)],
             temperature=0.0, tag="parse_seller",
         )
-        ask = normalize_price(data.get("ask"))
+        # Цену без единой цифры или слова «миллион» продавец не называл: модель подставила прежнюю из подсказки.
+        ask = normalize_price(data.get("ask")) if PRICE_WORDS.search(text.lower()) else None
         accept = bool(data.get("accept"))
     except LLM_FAIL as exc:
         raise CallError("модель не разобрала ответ продавца") from exc
@@ -214,7 +226,9 @@ async def extract_learned(llm: LLMClient, n: Negotiation) -> dict:
     labels = {q["label"] for q in n.questions}
     facts = {k: guard.output(v) for k, v in raw.items() if k in labels and isinstance(v, str) and v} if isinstance(raw, dict) else {}
     corrections = clean_corrections(data.get("corrections") if isinstance(data.get("corrections"), dict) else None, n.listing)
-    return {"facts": facts, "viewing": n.viewing or data.get("viewing"), "corrections": corrections}
+    # Время просмотра — только из ответа продавца; предложенный агентом слот не договорённость.
+    viewing = n.viewing or (data.get("viewing") if n.viewing_answered else None)
+    return {"facts": facts, "viewing": viewing, "corrections": corrections}
 
 
 def normalize_price(v) -> int | None:
@@ -240,14 +254,28 @@ def _int_or_none(v) -> int | None:
     return parse_money(str(v)) or (int(re.sub(r"\D", "", str(v))) if re.search(r"\d", str(v)) else None)
 
 
+WEEKDAYS = {"пн": "понедельн", "вт": "вторник", "ср": "сред", "чт": "четверг", "пт": "пятниц", "сб": "суббот", "вс": "воскрес"}
+
+
 def pick_slot(text: str, slots: list[str]) -> str | None:
-    t = text.lower()
+    """Какой из предложенных слотов выбрал продавец. День недели весомее числа:
+    в «субботу в 11» 11 — это час, а не 11 ноября."""
+    t = text.lower().replace("ё", "е")
+    best, score = None, 0
     for s in slots:
-        day = s.split(",")[0]  # «чт», «сб»
-        long = {"пн": "понедельн", "вт": "вторник", "ср": "сред", "чт": "четверг", "пт": "пятниц", "сб": "суббот", "вс": "воскрес"}[day]
-        if long in t or re.search(rf"\b{day}\b", t) or s.split(", ")[1].split(" ")[0] in t:
-            return s
-    return None
+        day, date, clock = (s.split(", ") + ["", ""])[:3]  # «сб», «14 ноя», «11:00»
+        number = date.split(" ")[0]
+        hour = clock.split(":")[0].lstrip("0") or "0"
+        points = 0
+        if WEEKDAYS.get(day, "-") in t or re.search(rf"\b{day}\b", t):
+            points += 4
+        if number and re.search(rf"\b{number}(?:-?го|\s*числа|\s+ноя|\s+дек|\s+янв)", t):
+            points += 2
+        if hour and re.search(rf"\b(?:в|на|к)\s*{hour}\b|\b{hour}:\d\d", t):
+            points += 1
+        if points > score:
+            best, score = s, points
+    return best
 
 
 # ------------------------------------------------------------------ ограничения (guards)
@@ -260,6 +288,11 @@ def guard_buyer(n: Negotiation, move: dict, phase: str, first: bool) -> list[str
     if first and "ассистент" not in move["utterance"].lower():
         move["utterance"] = "Здравствуйте, я ИИ-ассистент покупателя из Домклика, разговор записывается. " + move["utterance"]
         notes.append("Добавлено раскрытие: звонит ИИ-ассистент")
+    if not first:
+        # Посреди разговора «Добрый день» звучит как новый звонок — продавец слышит повтор и кладёт трубку.
+        trimmed = REGREET.sub("", move["utterance"]).strip()
+        if trimmed and trimmed != move["utterance"]:
+            move["utterance"] = trimmed[0].upper() + trimmed[1:]
     if phase != "bargain":
         move["offer"], move["accept"] = None, False
         return notes
@@ -339,6 +372,8 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
     async def seller_turn(round_no: int, phase: str):
         if n.live and human_input is not None:
             text = await human_input()
+            if text == HANGUP:
+                n.hung_up = True
             if text is None or text == HANGUP:
                 return None
             if phase == "bargain":
@@ -360,6 +395,9 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
         n.history.append({"speaker": "seller", "text": smove["utterance"], "ask": smove["ask"]})
         return smove
 
+    def silence() -> str:
+        return "(положил трубку)" if n.hung_up else "(продавец не ответил)"
+
     yield {"type": "call_start", "seller": n.seller["name"], "role": n.seller["role"], "base": n.listing["price"],
            "authority": n.authority, "target": n.target, "mode": n.mode, "questions": n.questions}
 
@@ -373,7 +411,7 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
         yield {"type": "await_seller"}
     smove = await seller_turn(0, "clarify")
     if smove is None:
-        yield {"type": "turn", "speaker": "seller", "text": "(продавец не ответил)", "ask": n.asking}
+        yield {"type": "turn", "speaker": "seller", "text": silence(), "ask": n.asking}
         n.status = "no_deal"
     else:
         n.asking = smove["ask"] or n.asking
@@ -397,7 +435,7 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
             prev_ask = n.asking
             smove = await seller_turn(round_no, "bargain")
             if smove is None:
-                yield {"type": "turn", "speaker": "seller", "text": "(продавец не ответил)", "ask": n.asking}
+                yield {"type": "turn", "speaker": "seller", "text": silence(), "ask": n.asking}
                 break
             n.asking = smove["ask"]
             yield {"type": "turn", "speaker": "seller", "text": smove["utterance"], "ask": n.asking, "phase": "bargain"}
@@ -418,20 +456,22 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
             n.status = "no_deal"
         yield price_event()
 
-        # 3) просмотр
-        yield {"type": "call_phase", "phase": "viewing"}
-        move, notes = await agent_turn(MAX_ROUNDS + 1, "viewing")
-        yield {"type": "turn", "speaker": "agent", "text": move["utterance"], "offer": None, "phase": "viewing"}
-        if n.live:
-            yield {"type": "await_seller"}
-        smove = await seller_turn(MAX_ROUNDS + 1, "viewing")
-        if smove is not None:
-            yield {"type": "turn", "speaker": "seller", "text": smove["utterance"], "ask": n.asking, "phase": "viewing"}
-            n.viewing = pick_slot(smove["utterance"], n.slots)
-            text = (f"Отлично, записал просмотр: {n.viewing}. Пришлю подтверждение клиенту. Спасибо, до свидания!"
-                    if n.viewing else "Спасибо! Уточню время с клиентом и напишу вам. До свидания!")
-            n.history.append({"speaker": "agent", "text": text, "offer": None})
-            yield {"type": "turn", "speaker": "agent", "text": text, "offer": None, "phase": "viewing"}
+        # 3) просмотр — только если собеседник ещё на линии: после «положил трубку» говорить некому
+        if not n.hung_up:
+            yield {"type": "call_phase", "phase": "viewing"}
+            move, notes = await agent_turn(MAX_ROUNDS + 1, "viewing")
+            yield {"type": "turn", "speaker": "agent", "text": move["utterance"], "offer": None, "phase": "viewing"}
+            if n.live:
+                yield {"type": "await_seller"}
+            smove = await seller_turn(MAX_ROUNDS + 1, "viewing")
+            if smove is not None:
+                n.viewing_answered = True
+                yield {"type": "turn", "speaker": "seller", "text": smove["utterance"], "ask": n.asking, "phase": "viewing"}
+                n.viewing = pick_slot(smove["utterance"], n.slots)
+                text = (f"Отлично, записал просмотр: {n.viewing}. Пришлю подтверждение клиенту. Спасибо, до свидания!"
+                        if n.viewing else "Спасибо! Уточню время с клиентом и напишу вам. До свидания!")
+                n.history.append({"speaker": "agent", "text": text, "offer": None})
+                yield {"type": "turn", "speaker": "agent", "text": text, "offer": None, "phase": "viewing"}
 
     learned = await extract_learned(llm, n)
     yield {

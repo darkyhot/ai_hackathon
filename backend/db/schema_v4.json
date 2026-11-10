@@ -1,0 +1,22 @@
+{
+  "sqlite": [
+    {
+      "name": "users",
+      "create": "",
+      "columns": {
+        "phone_allowed": "BOOLEAN NOT NULL DEFAULT 0"
+      },
+      "indexes": []
+    }
+  ],
+  "postgresql": [
+    {
+      "name": "users",
+      "create": "",
+      "columns": {
+        "phone_allowed": "BOOLEAN NOT NULL DEFAULT FALSE"
+      },
+      "indexes": []
+    }
+  ]
+}

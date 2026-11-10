@@ -40,7 +40,7 @@ class WorkshopAPI(unittest.TestCase):
         self.client=TestClient(main.app,base_url='https://testserver');self.client.__enter__()
         r=self.client.post('/api/auth/register',json={'email':'darkyhat@mail.ru','password':'workshop-test-123'})
         self.uid=r.json()['user']['id']
-        with db.session() as s:s.get(User,self.uid).premium=True
+        with db.session() as s:s.get(User,self.uid).premium=True;s.get(User,self.uid).phone_allowed=True
         self.rows=[listing(id='a',city='Москва',area=50,price=10_000_000),listing(id='b',city='Москва',area=70,price=12_000_000)]
         with db.session() as s:
             s.add(Chat(id='own',user_id=self.uid,title='Москва',profile=merge_profile({'city':'Москва','rooms':2}),
@@ -80,7 +80,7 @@ class WorkshopAPI(unittest.TestCase):
         other=r.json()['user']['id']
         with db.session() as s:s.get(User,other).premium=True
         me=self.client.get('/api/me').json()['user']
-        self.assertFalse(me['premium'],'Премиум (телефон оператора) — только у выданного аккаунта')
+        self.assertFalse(me['premium'],'Премиум-метка — только у выданного аккаунта')
         self.assertTrue(me['workshop'])
         response=self.client.get('/api/workshop/context')
         self.assertEqual(response.status_code,200,response.text)
@@ -97,6 +97,16 @@ class WorkshopAPI(unittest.TestCase):
             self.client.post('/api/auth/logout')
             self.assertFalse(self.client.get('/api/health').json()['phone']['ready'])
             self.assertEqual(self.client.post('/api/phone',json={'chat_id':'own','decision_id':'not-pending','destination':'79991234567'}).status_code,403)
+            # Новый аккаунт звонить не может, пока администратор не выдаст доступ вручную.
+            caller=self.client.post('/api/auth/register',json={'email':'caller@example.ru','password':'workshop-test-123'}).json()['user']['id']
+            self.assertFalse(self.client.get('/api/health').json()['phone']['ready'])
+            self.assertEqual(self.client.post('/api/phone',json={'chat_id':'own','decision_id':'not-pending','destination':'79991234567'}).status_code,403)
+            from scripts import phone_users
+            with patch.object(phone_users.db,'configure'):self.assertEqual(phone_users.main(['grant','Caller@Example.ru']),0)
+            with db.session() as s:self.assertTrue(s.get(User,caller).phone_allowed)
+            self.assertTrue(self.client.get('/api/health').json()['phone']['ready'],'Допуск действует без перезапуска')
+            response=self.client.post('/api/phone',json={'chat_id':'own','decision_id':'not-pending','destination':'79991234567'})
+            self.assertNotEqual(response.status_code,403,response.text)
 
     def test_favorites_and_math_come_from_owned_chat_without_uploads(self):
         context=self.client.get('/api/workshop/context?chat_id=own').json()

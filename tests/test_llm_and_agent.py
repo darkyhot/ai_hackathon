@@ -219,11 +219,13 @@ class NegotiationTest(unittest.TestCase):
             return [e async for e in N.run(NegotiationLLM(n), n, human_input=seller_input)]
 
         events = run(go())
-        self.assertEqual(sum(e["type"] == "await_seller" for e in events), 3)  # уточнение, торг, просмотр
+        # Звонок 10.11: продавец положил трубку на торге — агент не должен дальше «говорить» о просмотре в пустоту.
+        self.assertEqual(sum(e["type"] == "await_seller" for e in events), 2)  # уточнение и торг
+        self.assertNotIn("viewing", [e.get("phase") for e in events if e["type"] == "call_phase"])
         said = [e["text"] for e in events if e["type"] == "turn" and e["speaker"] == "seller"]
-        self.assertEqual(said[0], "Ремонт свежий, документы готовы")
-        self.assertNotIn(N.HANGUP, said)
+        self.assertEqual(said, ["Ремонт свежий, документы готовы", "(положил трубку)"])
         self.assertEqual(events[-1]["status"], "no_deal")
+        self.assertIsNone(events[-1]["viewing"], "Слот, который предложил агент, — не договорённость")
 
     def test_model_failure_stops_the_call_honestly(self):
         n = self.make()
@@ -393,6 +395,53 @@ class WishesAndMapTest(unittest.TestCase):
         self.assertEqual(move["ask"], 7_500_000)
         self.assertFalse(move["accept"])
         self.assertTrue(run(N.parse_human_seller(Boom(), n, "Ладно, согласен"))["accept"])
+
+    def test_short_yes_accepts_our_offer_and_model_cannot_invent_the_old_price(self):
+        """Звонок 10.11: агент — «сойдёмся на 22 950 000?», продавец — «Да, хорошо.». Агент зафиксировал 23 млн."""
+        x = listing(price=23_500_000)
+        n = N.Negotiation(listing=x, seller=seller_sim.build(x), fair=PR.fair_price(x, [x]), authority=23_500_000)
+        n.offer, n.asking = 22_950_000, 23_000_000
+
+        class Boom:
+            name = "deepseek"
+
+            async def chat_json(self, *a, **k):
+                raise AssertionError("модель не нужна")
+
+        for text in ("Да, хорошо.", "Ага, давайте", "Ладно", "Да."):
+            self.assertEqual(run(N.parse_human_seller(Boom(), n, text)), {"utterance": text, "ask": None, "accept": True}, text)
+        for text in ("Нет, хорошо подумайте", "Хорошо, но не меньше двадцати трёх", "Не могу, дорого"):
+            self.assertFalse(N._agrees(text), text)
+
+        class EchoesAsk:
+            name = "gigachat"
+
+            async def chat_json(self, *a, **k):
+                return {"ask": 23_000_000, "accept": True}  # модель повторила цену из подсказки
+
+        move = run(N.parse_human_seller(EchoesAsk(), n, "Да, но только наличными"))
+        self.assertEqual((move["ask"], move["accept"]), (None, True), "В реплике нет цены — прежнюю не подставляем")
+
+    def test_agent_does_not_greet_again_in_the_middle_of_the_call(self):
+        """Звонок 10.11: после ответа продавца агент начал «Добрый день. Хотим посмотреть квартиру…» — как новый звонок."""
+        x = listing(price=23_500_000)
+        n = N.Negotiation(listing=x, seller=seller_sim.build(x), fair=PR.fair_price(x, [x]), authority=23_500_000)
+        for phase in ("bargain", "viewing"):
+            move = {"utterance": "Добрый день. Хотим посмотреть квартиру.", "offer": None, "accept": False}
+            N.guard_buyer(n, move, phase, first=False)
+            self.assertEqual(move["utterance"], "Хотим посмотреть квартиру.", phase)
+        first = {"utterance": "Здравствуйте! Я ИИ-ассистент покупателя из Домклика.", "offer": None, "accept": False}
+        N.guard_buyer(n, first, "clarify", first=True)
+        self.assertTrue(first["utterance"].startswith("Здравствуйте"), "Первое приветствие остаётся")
+        self.assertIn("не здоровайся", N.prompts.CALL_PHASES["bargain"])
+
+    def test_viewing_slot_prefers_weekday_over_a_number_that_is_the_hour(self):
+        slots = ["ср, 11 ноя, 18:30", "сб, 14 ноя, 11:00"]
+        self.assertEqual(N.pick_slot("Субботу в 11.", slots), "сб, 14 ноя, 11:00")
+        self.assertEqual(N.pick_slot("давайте в среду", slots), "ср, 11 ноя, 18:30")
+        self.assertEqual(N.pick_slot("14-го в 11", slots), "сб, 14 ноя, 11:00")
+        self.assertEqual(N.pick_slot("11 ноября", slots), "ср, 11 ноя, 18:30")
+        self.assertIsNone(N.pick_slot("не знаю пока", slots))
 
     def test_counter_price_without_mln_is_not_agreement(self):
         """Агент: 23,4 млн. Продавец: «Нет, давай 23 600» — это встречная цена, а не согласие на 23,4."""

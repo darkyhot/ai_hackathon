@@ -163,16 +163,17 @@ async def synthesize(text: str, voice: int | None = None) -> bytes:
 
 
 def operator(user=None) -> bool:
-    return bool(user and user.get('premium') and str(user.get('email','')).casefold()==settings.workshop_email)
+    """Звонить может вошедший пользователь с ручным допуском; каждый звонок ещё требует разрешения на конкретную операцию."""
+    return bool(user and user.get('id') and user.get('phone'))
 
 
 def status(user=None) -> dict:
     return {"configured":configured(),'ready':configured() and (bool(settings.phone_pin) or operator(user)),
-            'mode':'restricted_operator','pin':bool(settings.phone_pin),'per_operation_grant':True}
+            'mode':'approved_users','pin':bool(settings.phone_pin),'per_operation_grant':True}
 
 
 def allowed(pin: str | None,user=None) -> bool:
-    """Звонок и синтез: операторский аккаунт либо корректный настроенный PIN."""
+    """Звонок и синтез: вошедший пользователь либо корректный настроенный PIN."""
     return operator(user) or (bool(settings.phone_pin) and secrets.compare_digest(pin or "",settings.phone_pin))
 
 

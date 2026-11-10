@@ -236,7 +236,7 @@ async def speech_to_text(request: Request):
 
 def _check_pin(request: Request):
     if not phone.allowed(request.headers.get("X-Phone-Pin"),auth.current_user(request)):
-        raise HTTPException(403, "Телефонные звонки доступны оператору. Войдите в разрешённый аккаунт или укажите операторский PIN.")
+        raise HTTPException(403, "Звонки на телефон доступны одобренным аккаунтам. Попросите администратора выдать доступ.")
 
 
 @app.post("/api/phone")
@@ -258,6 +258,14 @@ async def phone_config(req:PhoneRequest,request: Request):
 @app.post('/api/phone/close')
 async def phone_close(request:Request):
     who=phone_access.actor(*auth.whoami(request))
+    try:report=await request.json()
+    except ValueError:report=None
+    if isinstance(report,dict) and report:
+        # Причину срыва знает только браузер (ответ Exolve на вызов) — пишем её в журнал для разбора.
+        from .runtime import record
+        clean=lambda v:str(v)[:80] if v is not None else None
+        record('phone_call_closed',cause=clean(report.get('cause')),code=clean(report.get('code')),
+               reason=clean(report.get('reason')),stage=clean(report.get('stage')),attempt=clean(report.get('attempt')))
     return {'closed':db.required(phone_access.close,request.headers.get('X-Phone-Grant'),who)}
 
 

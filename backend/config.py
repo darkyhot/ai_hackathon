@@ -56,7 +56,6 @@ class Settings:
     max_cached_dialogues: int = max(max_active_dialogues+8,int(os.getenv('MAX_CACHED_DIALOGUES') or 64))
     max_dialogue_subscribers: int = max(1,int(os.getenv('MAX_DIALOGUE_SUBSCRIBERS') or 4))
     phone_tts_char_limit: int = max(500,int(os.getenv('PHONE_TTS_CHAR_LIMIT') or 12000))
-    phone_calls_per_hour: int = max(1,int(os.getenv('PHONE_CALLS_PER_HOUR') or 5))
     phone_call_max_seconds: int = max(30,min(900,int(os.getenv('PHONE_CALL_MAX_SECONDS') or 300)))
 
     # МТС Exolve: настоящий звонок продавцу (синтез речи + SIP через WebRTC)

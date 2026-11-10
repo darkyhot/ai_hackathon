@@ -274,7 +274,7 @@ async def _prepare(s):
     if answered is not None:
         validation.validate(answered,CHANGE_SCHEMA)
         s.request_review={'seq':version,'base_profile':base_profile,'intent':'refine',
-            'decision':'apply' if answered else 'unchanged','changes':answered,'question':'','options':[]}
+            'decision':'apply' if answered else 'unchanged','changes':answered,'question':'','options':[],'source':'bound_card_choice'}
         record('request_review',session=s.id,decision=s.request_review['decision'],intent='refine',
                changed_keys=list(answered),source='bound_card_choice')
         return s.request_review
@@ -284,7 +284,7 @@ async def _prepare(s):
         validation.validate(confirmed,CHANGE_SCHEMA)
         s.request_review={'seq':version,'base_profile':base_profile,'intent':'refine' if (s.search or s.shown) else 'search',
                           'decision':'apply','changes':confirmed,'question':'','options':[],'selection':None,'call_ids':None,
-                          'unsupported':[]}
+                          'unsupported':[],'source':'city_confirmation'}
         record('request_review',session=s.id,decision='apply',intent=s.request_review['intent'],
                changed_keys=list(confirmed),source='city_confirmation')
         return s.request_review
@@ -297,7 +297,7 @@ async def _prepare(s):
         # Простое сообщение («двушка в Казани до 9 млн») разобрано кодом — без двух запросов к модели.
         s.request_review={'seq':version,'base_profile':base_profile,'intent':'refine' if (s.search or s.shown) else 'search',
                           'decision':'apply','changes':fast,'question':'','options':[],'selection':None,'call_ids':None,
-                          'unsupported':[]}
+                          'unsupported':[],'source':'rules'}
         record('rule_parser',session=s.id,outcome='accepted',changed_keys=list(fast))
         record('request_review',session=s.id,decision='apply',intent=s.request_review['intent'],fields=len(fast),
                changed_keys=list(fast),source='rules')
@@ -432,7 +432,7 @@ async def _prepare(s):
         if s.request_inputs[-1]['seq']!=version or s.client_revision!=revision or s.profile!=base_profile:
             from .session import Superseded
             raise Superseded()
-        s.request_review={'seq':version,'base_profile':base_profile,**result}
+        s.request_review={'seq':version,'base_profile':base_profile,**result,'source':'model'}
         if fast is not None:_shadow_compare(s,fast,result)
         query=result.get('selection') or {}
         record('request_review',session=s.id,decision=result['decision'],intent=result['intent'],
@@ -504,6 +504,12 @@ async def ensure(s):
         result = apply_request(s, changes, condition_sources=review.get('condition_sources'))
     else:
         result = None
+    answered_payment_card = s.profile.pop('_payment_asked', False)
+    if changes.get('payment') and s.profile.get('payment') == changes['payment'] and review['decision'] == 'apply':
+        # Модель угадывает оплату и по «бюджет до 25 млн». Такую догадку
+        # подтверждает карточка перед звонком; прямой ответ на неё или
+        # однозначная фраза из детерминированного разбора — уже решение клиента.
+        s.profile['_payment_confirmed'] = bool(answered_payment_card or review.get('source') in ('rules', 'bound_card_choice'))
     s.request_review_seq = review['seq']
     s.request_intent = review['intent']
     s.last_issue=None

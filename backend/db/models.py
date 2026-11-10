@@ -43,6 +43,8 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime)
     premium: Mapped[bool] = mapped_column(Boolean, default=False, server_default='0')
+    # Звонок на телефон продавцу платный: доступ выдаётся вручную (scripts/phone_users.py).
+    phone_allowed: Mapped[bool] = mapped_column(Boolean, default=False, server_default='0')
 
 
 class WorkshopJob(Base):
