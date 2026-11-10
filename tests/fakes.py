@@ -83,7 +83,9 @@ class NegotiationLLM(LLMClient):
     async def chat_json(self, messages, *, tag: str = "", **kw) -> dict:
         n = self.n
         if tag == "buyer_turn":
-            phase = "clarify" if "знакомство" in messages[1]["content"] else "viewing" if "ЭТАП: просмотр" in messages[1]["content"] else "bargain"
+            task = messages[0]["content"]  # задача этапа — в системном сообщении, не в данных
+            assert "ЭТАП" not in messages[1]["content"], "инструкция этапа не должна лежать в сообщении данных"
+            phase = "clarify" if "знакомство" in task else "viewing" if "ЭТАП: просмотр" in task else "bargain"
             if phase == "clarify":
                 return {"utterance": "Здравствуйте! Я ИИ-ассистент покупателя из Домклика, разговор записывается. Квартира продаётся?",
                         "offer": None, "accept": False}

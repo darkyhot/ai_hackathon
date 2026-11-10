@@ -108,14 +108,16 @@ async def llm_buyer(llm: LLMClient, n: Negotiation, round_no: int, phase: str) -
         price=n.listing["price"], fair=n.fair["fair"], low=n.fair["low"], high=n.fair["high"],
     )
     stage = prompts.CALL_PHASES[phase].format(questions=n.question_text(), slots=" или ".join(n.slots))
-    user = (
-        f"{stage}\nТекущая цена продавца: {n.asking} ₽. Твоё последнее предложение: {n.offer or 'ещё не было'}.\n"
-        f"{'Продавец назвал последнее слово. ' if n.seller_final else ''}"
-        f"Разговор:\n{n.transcript()}\n\nТвоя следующая реплика (JSON):"
+    # Задача этапа — инструкция, поэтому она в системном сообщении. В сообщении данных её нельзя:
+    # guard.POLICY велит считать данные не инструкциями, и модель начинала разговор заново («Добрый день…»).
+    task = (
+        f"\n\nСЕЙЧАС. {stage}\nТекущая цена продавца: {n.asking} ₽. Твоё последнее предложение: {n.offer or 'ещё не было'}."
+        f"{' Продавец назвал последнее слово.' if n.seller_final else ''}\n"
+        "Расшифровка разговора — в сообщении данных. Верни свою следующую реплику (JSON)."
     )
-    data = await llm.chat_json([{"role": "system", "content": system + "\n" + guard.POLICY},
+    data = await llm.chat_json([{"role": "system", "content": system + task + "\n" + guard.POLICY},
                                 guard.data_message("negotiation", {"listing": n.listing_title(), "arguments": n.args,
-                                                                  "conversation": user})],
+                                                                  "transcript": n.transcript()})],
                                temperature=0.6, tag="buyer_turn")
     return {"utterance": str(data.get("utterance") or "").strip(), "offer": _int_or_none(data.get("offer")),
             "accept": bool(data.get("accept"))}
@@ -126,11 +128,11 @@ async def llm_seller(llm: LLMClient, n: Negotiation, phase: str) -> dict:
     system = prompts.SELLER_SYSTEM.format(
         price=n.listing["price"], min_price=s["min_price"],
     )
-    user = (f"Твоя текущая цена: {n.asking} ₽. Последнее предложение покупателя: {n.offer or 'не было'}.\n"
-            f"Разговор:\n{n.transcript()}\n\nТвоя реплика (JSON):")
-    data = await llm.chat_json([{"role": "system", "content": system + "\n" + guard.POLICY},
+    task = (f"\n\nСЕЙЧАС. Твоя текущая цена: {n.asking} ₽. Последнее предложение покупателя: {n.offer or 'не было'}.\n"
+            "Расшифровка разговора — в сообщении данных. Верни свою реплику (JSON).")
+    data = await llm.chat_json([{"role": "system", "content": system + task + "\n" + guard.POLICY},
                                 guard.data_message("seller_simulation", {"listing": n.listing_title(), "persona": s,
-                                                                        "conversation": user})],
+                                                                        "transcript": n.transcript()})],
                                temperature=0.7, tag="seller_turn")
     return {"utterance": str(data.get("utterance") or "").strip(), "ask": _int_or_none(data.get("ask")),
             "accept": bool(data.get("accept"))}
