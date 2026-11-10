@@ -37,7 +37,13 @@ MAX_ROUNDS = 6
 LIVE_MODES = {"human", "phone"}  # продавец отвечает сам: в браузере или по телефону
 HANGUP = "(положил трубку)"  # так браузер сообщает, что продавец завершил звонок
 STEP = 10_000
-AGREE_WORDS = ("соглас", "договорились", "по рукам", "давайте так", "хорошо, давайте", "идёт", "идет", "устраивает")
+AGREE_WORDS = ("соглас", "договорились", "по рукам", "давайте так", "хорошо, давайте", "идёт", "идет", "устраивает",
+               "хорошо", "ладно", "подходит", "подойдёт", "подойдет", "годится", "окей", "конечно")
+# Короткое «Да.», «Ага, давайте» в ответ на наше предложение — тоже согласие.
+AGREE_START = re.compile(r"^\W*(?:да|ага|угу|ок|давайте|можно)\b")
+REFUSE = re.compile(r"\bне\s+(?:со)?глас|\bне\s+устраива|\bне\s+подход|\bне\s+могу|\bнет\b|\bдорого|\bмало\b"
+                    r"|\bно\b|\bне\s+меньше|\bне\s+ниже|\bминимум")
+PRICE_WORDS = re.compile(r"\d|миллион|млн|тысяч|лям")
 
 
 def r10k(v: float) -> int:
@@ -128,8 +134,8 @@ async def llm_seller(llm: LLMClient, n: Negotiation, phase: str) -> dict:
 
 
 def _agrees(text: str) -> bool:
-    t = text.lower()
-    return any(w in t for w in AGREE_WORDS) and not re.search(r"\bне\s+(?:со)?глас|\bне\s+устраива", t)
+    t = text.lower().replace("ё", "е")
+    return bool(any(w.replace("ё", "е") in t for w in AGREE_WORDS) or AGREE_START.search(t)) and not REFUSE.search(t)
 
 
 async def parse_human_seller(llm: LLMClient, n: Negotiation, text: str) -> dict:
@@ -139,7 +145,7 @@ async def parse_human_seller(llm: LLMClient, n: Negotiation, text: str) -> dict:
     ask = parse_price_near(text, n.listing["price"])
     if ask:
         return {"utterance": text, "ask": ask, "accept": n.offer is not None and ask <= n.offer}
-    if _agrees(text) and not re.search(r"\d", text):
+    if _agrees(text) and not PRICE_WORDS.search(text.lower()):
         return {"utterance": text, "ask": None, "accept": True}
     try:
         data = await llm.chat_json(
@@ -147,7 +153,8 @@ async def parse_human_seller(llm: LLMClient, n: Negotiation, text: str) -> dict:
              guard.data_message("seller_utterance", text)],
             temperature=0.0, tag="parse_seller",
         )
-        ask = normalize_price(data.get("ask"))
+        # Цену без единой цифры или слова «миллион» продавец не называл: модель подставила прежнюю из подсказки.
+        ask = normalize_price(data.get("ask")) if PRICE_WORDS.search(text.lower()) else None
         accept = bool(data.get("accept"))
     except LLM_FAIL as exc:
         raise CallError("модель не разобрала ответ продавца") from exc
@@ -240,14 +247,28 @@ def _int_or_none(v) -> int | None:
     return parse_money(str(v)) or (int(re.sub(r"\D", "", str(v))) if re.search(r"\d", str(v)) else None)
 
 
+WEEKDAYS = {"пн": "понедельн", "вт": "вторник", "ср": "сред", "чт": "четверг", "пт": "пятниц", "сб": "суббот", "вс": "воскрес"}
+
+
 def pick_slot(text: str, slots: list[str]) -> str | None:
-    t = text.lower()
+    """Какой из предложенных слотов выбрал продавец. День недели весомее числа:
+    в «субботу в 11» 11 — это час, а не 11 ноября."""
+    t = text.lower().replace("ё", "е")
+    best, score = None, 0
     for s in slots:
-        day = s.split(",")[0]  # «чт», «сб»
-        long = {"пн": "понедельн", "вт": "вторник", "ср": "сред", "чт": "четверг", "пт": "пятниц", "сб": "суббот", "вс": "воскрес"}[day]
-        if long in t or re.search(rf"\b{day}\b", t) or s.split(", ")[1].split(" ")[0] in t:
-            return s
-    return None
+        day, date, clock = (s.split(", ") + ["", ""])[:3]  # «сб», «14 ноя», «11:00»
+        number = date.split(" ")[0]
+        hour = clock.split(":")[0].lstrip("0") or "0"
+        points = 0
+        if WEEKDAYS.get(day, "-") in t or re.search(rf"\b{day}\b", t):
+            points += 4
+        if number and re.search(rf"\b{number}(?:-?го|\s*числа|\s+ноя|\s+дек|\s+янв)", t):
+            points += 2
+        if hour and re.search(rf"\b(?:в|на|к)\s*{hour}\b|\b{hour}:\d\d", t):
+            points += 1
+        if points > score:
+            best, score = s, points
+    return best
 
 
 # ------------------------------------------------------------------ ограничения (guards)
