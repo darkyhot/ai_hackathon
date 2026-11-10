@@ -417,7 +417,7 @@ export function summary(s) {
   <section class="panel">
     <div class="receipt receipt--single">
       <div>
-        <h2 class="panel-title">Сделка проведена</h2>
+        <h2 class="panel-title">Сделка запущена</h2>
         <p class="panel-lead">${s.listing.address}, ${s.listing.district || s.listing.city}${s.listing.url ? "" : ""}</p>
         <div class="hero-num num">−${rub(s.savings)}</div>
         <dl class="ledger">
