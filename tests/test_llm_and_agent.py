@@ -422,6 +422,19 @@ class WishesAndMapTest(unittest.TestCase):
         move = run(N.parse_human_seller(EchoesAsk(), n, "Да, но только наличными"))
         self.assertEqual((move["ask"], move["accept"]), (None, True), "В реплике нет цены — прежнюю не подставляем")
 
+    def test_agent_does_not_greet_again_in_the_middle_of_the_call(self):
+        """Звонок 10.11: после ответа продавца агент начал «Добрый день. Хотим посмотреть квартиру…» — как новый звонок."""
+        x = listing(price=23_500_000)
+        n = N.Negotiation(listing=x, seller=seller_sim.build(x), fair=PR.fair_price(x, [x]), authority=23_500_000)
+        for phase in ("bargain", "viewing"):
+            move = {"utterance": "Добрый день. Хотим посмотреть квартиру.", "offer": None, "accept": False}
+            N.guard_buyer(n, move, phase, first=False)
+            self.assertEqual(move["utterance"], "Хотим посмотреть квартиру.", phase)
+        first = {"utterance": "Здравствуйте! Я ИИ-ассистент покупателя из Домклика.", "offer": None, "accept": False}
+        N.guard_buyer(n, first, "clarify", first=True)
+        self.assertTrue(first["utterance"].startswith("Здравствуйте"), "Первое приветствие остаётся")
+        self.assertIn("не здоровайся", N.prompts.CALL_PHASES["bargain"])
+
     def test_viewing_slot_prefers_weekday_over_a_number_that_is_the_hour(self):
         slots = ["ср, 11 ноя, 18:30", "сб, 14 ноя, 11:00"]
         self.assertEqual(N.pick_slot("Субботу в 11.", slots), "сб, 14 ноя, 11:00")

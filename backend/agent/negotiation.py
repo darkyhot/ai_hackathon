@@ -43,6 +43,7 @@ AGREE_WORDS = ("соглас", "договорились", "по рукам", "�
 AGREE_START = re.compile(r"^\W*(?:да|ага|угу|ок|давайте|можно)\b")
 REFUSE = re.compile(r"\bне\s+(?:со)?глас|\bне\s+устраива|\bне\s+подход|\bне\s+могу|\bнет\b|\bдорого|\bмало\b"
                     r"|\bно\b|\bне\s+меньше|\bне\s+ниже|\bминимум")
+REGREET = re.compile(r"^\W*(?:добрый\s+(?:день|вечер)|доброе\s+утро|здравствуйте|приветствую)[\s!.,]*", re.IGNORECASE)
 PRICE_WORDS = re.compile(r"\d|миллион|млн|тысяч|лям")
 
 
@@ -285,6 +286,11 @@ def guard_buyer(n: Negotiation, move: dict, phase: str, first: bool) -> list[str
     if first and "ассистент" not in move["utterance"].lower():
         move["utterance"] = "Здравствуйте, я ИИ-ассистент покупателя из Домклика, разговор записывается. " + move["utterance"]
         notes.append("Добавлено раскрытие: звонит ИИ-ассистент")
+    if not first:
+        # Посреди разговора «Добрый день» звучит как новый звонок — продавец слышит повтор и кладёт трубку.
+        trimmed = REGREET.sub("", move["utterance"]).strip()
+        if trimmed and trimmed != move["utterance"]:
+            move["utterance"] = trimmed[0].upper() + trimmed[1:]
     if phase != "bargain":
         move["offer"], move["accept"] = None, False
         return notes
