@@ -330,7 +330,9 @@ export function confirmCard(ev) {
   }
   if (ev.kind === "call" && config.phoneReady) {
     extra.innerHTML = html`<label class="phone-field">Ваш телефон — агент позвонит вам как продавцу
-      <input type="tel" inputmode="tel" placeholder="+7 999 123-45-67" value="${storedPhone()}" data-phone autocomplete="tel"></label>`;
+      <input type="tel" inputmode="tel" placeholder="Например, 8 999 123-45-67" value="${storedPhone()}" data-phone autocomplete="tel">
+      <span class="phone-check" data-phone-check></span></label>`;
+    bindPhoneCheck(card);
   }
   if (ev.kind === 'call') {
     extra.insertAdjacentHTML('beforeend', html`<label class="phone-field">Что уточнить у продавца? Измените или добавьте вопросы, по одному на строку.
@@ -470,6 +472,23 @@ function storedPhone() {
   try { return localStorage.getItem("sellerPhone") || config.sellerPhoneDefault; } catch { return config.sellerPhoneDefault; }
 }
 
+/** Любая запись российского номера подходит: +7 / 8 / без кода, пробелы, скобки и дефисы не важны. */
+function bindPhoneCheck(card) {
+  const input = card.querySelector("[data-phone]");
+  const check = card.querySelector("[data-phone-check]");
+  const show = () => {
+    const digits = input.value.replace(/\D/g, "");
+    const number = normalizePhone(input.value);
+    check.classList.toggle("is-ok", Boolean(number));
+    check.classList.toggle("is-bad", !number && digits.length > 0);
+    check.textContent = number ? `Позвоню на ${formatPhone(number)}`
+      : !digits.length ? "Любой формат: с +7 или 8, пробелы и скобки не важны"
+      : "Нужен российский номер: 11 цифр с +7 или 8, например 8\u00a0999\u00a0123-45-67";
+  };
+  input.addEventListener("input", show);
+  show();
+}
+
 async function dialSeller(card, label) {
   const input = card.querySelector("[data-phone]");
   const number = normalizePhone(input?.value);
@@ -478,7 +497,7 @@ async function dialSeller(card, label) {
     card.querySelector(".dial-note")?.remove();
     card.querySelector(".actions").before(el(html`<p class="dial-note ${isError ? "mic-error" : ""}">${text}</p>`));
   };
-  if (!number) { note("Введите российский номер: +7 и 10 цифр.", true); input?.focus(); return; }
+  if (!number) { note("Проверьте номер: нужно 11 цифр с +7 или 8, например 8\u00a0999\u00a0123-45-67.", true); input?.focus(); return; }
   try { localStorage.setItem("sellerPhone", input.value.trim()); } catch { /* приватный режим */ }
   const buttons = card.querySelectorAll("button, input");
   buttons.forEach((x) => (x.disabled = true));
@@ -500,7 +519,7 @@ async function dialSeller(card, label) {
   } catch (e) {
     if (state.phone === phone) state.phone = null;
     buttons.forEach((x) => (x.disabled = false));
-    note(e.message, true);
+    note(`${e.message} Можно проверить номер и нажать «${label}» ещё раз.`, true);
     return;
   }
   // продавец положил трубку: ближайшее ожидание ответа (listenPhone) сообщит агенту

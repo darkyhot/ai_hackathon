@@ -223,6 +223,16 @@ class PhoneScope(unittest.TestCase):
             self.assertEqual(synth.await_count,1)
             owner.post('/api/phone/close',headers=auth)
             self.assertEqual(owner.post('/api/tts',json={'text':'Ещё'},headers=auth).status_code,403)
+            # Не дозвонились — карточка ждёт решения, тот же звонок можно повторить с новым токеном.
+            retry=owner.post('/api/phone',json=payload,headers=headers)
+            self.assertEqual(retry.status_code,200,retry.text);fresh=retry.json()['grant_token']
+            self.assertNotEqual(fresh,token)
+            self.assertEqual(owner.post('/api/phone',json=payload,headers=headers).status_code,409,'Пока звонок идёт, второй не выдаём')
+            self.assertEqual(owner.post('/api/tts',json={'text':'Ещё'},headers=auth).status_code,403,'Старый токен не оживает')
+            from backend.db.models import PhoneGrant
+            with db.session() as row_session:row_session.get(PhoneGrant,fresh.split('.')[0]).status='connected'
+            owner.post('/api/phone/close',headers={**headers,'X-Phone-Grant':fresh})
+            self.assertEqual(owner.post('/api/phone',json=payload,headers=headers).status_code,409,'Разговор состоялся — повтор только через агента')
 
     def test_public_phone_without_operator_pin_is_closed(self):
         with patch.object(phone,'settings',replace(settings,phone_pin='')):
