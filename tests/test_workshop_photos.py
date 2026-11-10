@@ -112,8 +112,9 @@ class PhotoTests(unittest.IsolatedAsyncioTestCase):
         g._get_token=AsyncMock(return_value='fixture-token')
         await g.analyze_images('Ответь JSON',[image]);self.assertEqual(requests[-1],'/files/test-file/delete');await g._http.aclose()
 
-    def test_phone_is_open_to_every_signed_in_user_or_valid_pin(self):
+    def test_phone_needs_a_manually_approved_account_or_valid_pin(self):
         with patch.object(phone,'settings',replace(settings,phone_pin='',exolve_api_key='fixture')):
-            for user in ({'id':1,'email':'darkyhat@mail.ru','premium':True},{'id':2,'email':'other@example.ru','premium':False}):
+            for user in ({'id':1,'email':'darkyhat@mail.ru','premium':True,'phone':True},{'id':2,'email':'other@example.ru','premium':False,'phone':True}):
                 self.assertTrue(phone.allowed(None,user));self.assertTrue(phone.status(user)['ready'])
-            self.assertFalse(phone.allowed(None,None));self.assertFalse(phone.status(None)['ready'])
+            for user in (None,{'id':3,'email':'new@example.ru','premium':True,'phone':False},{'id':4,'email':'new2@example.ru'}):
+                self.assertFalse(phone.allowed(None,user));self.assertFalse(phone.status(user)['ready'])

@@ -163,13 +163,13 @@ async def synthesize(text: str, voice: int | None = None) -> bytes:
 
 
 def operator(user=None) -> bool:
-    """Звонить может любой вошедший пользователь; каждый звонок ещё требует разрешения на конкретную операцию."""
-    return bool(user and user.get('id'))
+    """Звонить может вошедший пользователь с ручным допуском; каждый звонок ещё требует разрешения на конкретную операцию."""
+    return bool(user and user.get('id') and user.get('phone'))
 
 
 def status(user=None) -> dict:
     return {"configured":configured(),'ready':configured() and (bool(settings.phone_pin) or operator(user)),
-            'mode':'signed_in','pin':bool(settings.phone_pin),'per_operation_grant':True}
+            'mode':'approved_users','pin':bool(settings.phone_pin),'per_operation_grant':True}
 
 
 def allowed(pin: str | None,user=None) -> bool:

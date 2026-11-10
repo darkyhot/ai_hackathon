@@ -236,7 +236,7 @@ async def speech_to_text(request: Request):
 
 def _check_pin(request: Request):
     if not phone.allowed(request.headers.get("X-Phone-Pin"),auth.current_user(request)):
-        raise HTTPException(403, "Телефонные звонки доступны после входа в аккаунт.")
+        raise HTTPException(403, "Звонки на телефон доступны одобренным аккаунтам. Попросите администратора выдать доступ.")
 
 
 @app.post("/api/phone")
