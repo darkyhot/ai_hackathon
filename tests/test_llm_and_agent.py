@@ -219,11 +219,13 @@ class NegotiationTest(unittest.TestCase):
             return [e async for e in N.run(NegotiationLLM(n), n, human_input=seller_input)]
 
         events = run(go())
-        self.assertEqual(sum(e["type"] == "await_seller" for e in events), 3)  # уточнение, торг, просмотр
+        # Звонок 10.11: продавец положил трубку на торге — агент не должен дальше «говорить» о просмотре в пустоту.
+        self.assertEqual(sum(e["type"] == "await_seller" for e in events), 2)  # уточнение и торг
+        self.assertNotIn("viewing", [e.get("phase") for e in events if e["type"] == "call_phase"])
         said = [e["text"] for e in events if e["type"] == "turn" and e["speaker"] == "seller"]
-        self.assertEqual(said[0], "Ремонт свежий, документы готовы")
-        self.assertNotIn(N.HANGUP, said)
+        self.assertEqual(said, ["Ремонт свежий, документы готовы", "(положил трубку)"])
         self.assertEqual(events[-1]["status"], "no_deal")
+        self.assertIsNone(events[-1]["viewing"], "Слот, который предложил агент, — не договорённость")
 
     def test_model_failure_stops_the_call_honestly(self):
         n = self.make()

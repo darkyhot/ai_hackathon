@@ -52,6 +52,23 @@ class ProductsTest(unittest.IsolatedAsyncioTestCase):
         if s.profile['payment'] == 'mortgage_saving':
             await self.act(s, 'savings_plan', ask=answer(True))
 
+    async def test_price_card_says_over_limit_only_when_the_price_is_over_budget(self):
+        """Звонок 10.11 прервался на торге: цена 23,5 млн при бюджете 25 млн, а карточка писала «выше лимита»."""
+        s = self.agent(budget_max=25_000_000)
+        x = self.chosen(s, price=23_500_000)
+        s.calls[x['id']].update(status='no_deal', price=23_500_000)
+        ask = answer(False)
+        await self.act(s, 'confirm_price', ask=ask, listing_id=x['id'])
+        text = ask.call_args.args[2]
+        self.assertNotIn('выше лимита', text)
+        self.assertIn('23 500 000', text)
+        over = self.agent(budget_max=23_000_000)
+        y = self.chosen(over, price=23_500_000)
+        over.calls[y['id']].update(status='no_deal', price=23_500_000)
+        ask = answer(False)
+        await self.act(over, 'confirm_price', ask=ask, listing_id=y['id'])
+        self.assertIn('выше лимита', ask.call_args.args[2])
+
     # ---------------------------------------------------------- карточка «Деньги к сделке»
 
     async def test_cash_buyer_gets_parking_and_title_without_life_insurance(self):

@@ -68,6 +68,8 @@ class Negotiation:
     status: str = "talking"  # talking | agreed | no_deal
     agreed_price: int | None = None
     viewing: str | None = None
+    hung_up: bool = False           # продавец положил трубку (или связь оборвалась) — разговор окончен
+    viewing_answered: bool = False  # продавец ответил на вопрос о просмотре
 
     @property
     def live(self) -> bool:
@@ -221,7 +223,9 @@ async def extract_learned(llm: LLMClient, n: Negotiation) -> dict:
     labels = {q["label"] for q in n.questions}
     facts = {k: guard.output(v) for k, v in raw.items() if k in labels and isinstance(v, str) and v} if isinstance(raw, dict) else {}
     corrections = clean_corrections(data.get("corrections") if isinstance(data.get("corrections"), dict) else None, n.listing)
-    return {"facts": facts, "viewing": n.viewing or data.get("viewing"), "corrections": corrections}
+    # Время просмотра — только из ответа продавца; предложенный агентом слот не договорённость.
+    viewing = n.viewing or (data.get("viewing") if n.viewing_answered else None)
+    return {"facts": facts, "viewing": viewing, "corrections": corrections}
 
 
 def normalize_price(v) -> int | None:
@@ -360,6 +364,8 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
     async def seller_turn(round_no: int, phase: str):
         if n.live and human_input is not None:
             text = await human_input()
+            if text == HANGUP:
+                n.hung_up = True
             if text is None or text == HANGUP:
                 return None
             if phase == "bargain":
@@ -381,6 +387,9 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
         n.history.append({"speaker": "seller", "text": smove["utterance"], "ask": smove["ask"]})
         return smove
 
+    def silence() -> str:
+        return "(положил трубку)" if n.hung_up else "(продавец не ответил)"
+
     yield {"type": "call_start", "seller": n.seller["name"], "role": n.seller["role"], "base": n.listing["price"],
            "authority": n.authority, "target": n.target, "mode": n.mode, "questions": n.questions}
 
@@ -394,7 +403,7 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
         yield {"type": "await_seller"}
     smove = await seller_turn(0, "clarify")
     if smove is None:
-        yield {"type": "turn", "speaker": "seller", "text": "(продавец не ответил)", "ask": n.asking}
+        yield {"type": "turn", "speaker": "seller", "text": silence(), "ask": n.asking}
         n.status = "no_deal"
     else:
         n.asking = smove["ask"] or n.asking
@@ -418,7 +427,7 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
             prev_ask = n.asking
             smove = await seller_turn(round_no, "bargain")
             if smove is None:
-                yield {"type": "turn", "speaker": "seller", "text": "(продавец не ответил)", "ask": n.asking}
+                yield {"type": "turn", "speaker": "seller", "text": silence(), "ask": n.asking}
                 break
             n.asking = smove["ask"]
             yield {"type": "turn", "speaker": "seller", "text": smove["utterance"], "ask": n.asking, "phase": "bargain"}
@@ -439,20 +448,22 @@ async def run(llm: LLMClient, n: Negotiation, human_input: SellerInput | None = 
             n.status = "no_deal"
         yield price_event()
 
-        # 3) просмотр
-        yield {"type": "call_phase", "phase": "viewing"}
-        move, notes = await agent_turn(MAX_ROUNDS + 1, "viewing")
-        yield {"type": "turn", "speaker": "agent", "text": move["utterance"], "offer": None, "phase": "viewing"}
-        if n.live:
-            yield {"type": "await_seller"}
-        smove = await seller_turn(MAX_ROUNDS + 1, "viewing")
-        if smove is not None:
-            yield {"type": "turn", "speaker": "seller", "text": smove["utterance"], "ask": n.asking, "phase": "viewing"}
-            n.viewing = pick_slot(smove["utterance"], n.slots)
-            text = (f"Отлично, записал просмотр: {n.viewing}. Пришлю подтверждение клиенту. Спасибо, до свидания!"
-                    if n.viewing else "Спасибо! Уточню время с клиентом и напишу вам. До свидания!")
-            n.history.append({"speaker": "agent", "text": text, "offer": None})
-            yield {"type": "turn", "speaker": "agent", "text": text, "offer": None, "phase": "viewing"}
+        # 3) просмотр — только если собеседник ещё на линии: после «положил трубку» говорить некому
+        if not n.hung_up:
+            yield {"type": "call_phase", "phase": "viewing"}
+            move, notes = await agent_turn(MAX_ROUNDS + 1, "viewing")
+            yield {"type": "turn", "speaker": "agent", "text": move["utterance"], "offer": None, "phase": "viewing"}
+            if n.live:
+                yield {"type": "await_seller"}
+            smove = await seller_turn(MAX_ROUNDS + 1, "viewing")
+            if smove is not None:
+                n.viewing_answered = True
+                yield {"type": "turn", "speaker": "seller", "text": smove["utterance"], "ask": n.asking, "phase": "viewing"}
+                n.viewing = pick_slot(smove["utterance"], n.slots)
+                text = (f"Отлично, записал просмотр: {n.viewing}. Пришлю подтверждение клиенту. Спасибо, до свидания!"
+                        if n.viewing else "Спасибо! Уточню время с клиентом и напишу вам. До свидания!")
+                n.history.append({"speaker": "agent", "text": text, "offer": None})
+                yield {"type": "turn", "speaker": "agent", "text": text, "offer": None, "phase": "viewing"}
 
     learned = await extract_learned(llm, n)
     yield {

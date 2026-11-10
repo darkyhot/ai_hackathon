@@ -201,8 +201,12 @@ async def confirm_price(s, listing_id: str) -> dict:
     over_budget = price > s.profile["budget_max"]
     if call["status"] == "agreed":
         text = f"Продавец согласен на {fmt(price)} (было {fmt(x['price'])}). Подтвердить предложение?"
-    else:
+    elif over_budget:
         text = f"Продавец остановился на {fmt(price)} — это выше лимита, который вы мне дали. Согласиться всё равно?"
+    else:
+        # Не договорились (продавец не уступил или звонок прервался), но цена в пределах лимита.
+        text = (f"Скидку согласовать не удалось: цена продавца {fmt(price)}"
+                + (f" (было {fmt(x['price'])})" if price != x["price"] else "") + ". Согласиться на эту цену?")
     if over_budget:
         text += f" Внимание: цена выше вашего бюджета {fmt(s.profile['budget_max'])}."
     r = await s.ask("price", "Подтвердите цену", text, price=price, savings=x["price"] - price, base=x["price"],
