@@ -489,6 +489,9 @@ function bindPhoneCheck(card) {
   show();
 }
 
+const MAX_DIAL_ATTEMPTS = 3;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function dialSeller(card, label) {
   const input = card.querySelector("[data-phone]");
   const number = normalizePhone(input?.value);
@@ -502,25 +505,37 @@ async function dialSeller(card, label) {
   const buttons = card.querySelectorAll("button, input");
   buttons.forEach((x) => (x.disabled = true));
   voice.stop();
-  const phone = state.phone && !state.phone.ended ? state.phone : new PhoneCall({chat_id:state.sid,decision_id:card.dataset.decisionId});
-  state.phone = phone;
-  phone.onAudioState = (audioState) => {
-    const button = $("resumeCallAudio");
-    if (button) button.hidden = audioState === "running" || audioState === "closed";
-  };
   const steps = {
     connecting: "Подключаюсь к МТС Exolve…",
     dialing: `Звоню на ${formatPhone(number)}…`,
     ringing: `Звоню на ${formatPhone(number)} — возьмите трубку. Вы — продавец квартиры.`,
     answered: "Трубку взяли — агент начинает разговор.",
   };
-  try {
-    await phone.dial(number, (st) => note(steps[st] || st));
-  } catch (e) {
-    if (state.phone === phone) state.phone = null;
-    buttons.forEach((x) => (x.disabled = false));
-    note(`${e.message} Можно проверить номер и нажать «${label}» ещё раз.`, true);
-    return;
+  let phone = null;
+  // Exolve иногда отбивает первый вызов ещё до гудков (в его истории такого звонка нет) — повторяем сами.
+  for (let attempt = 1; ; attempt++) {
+    phone = attempt === 1 && state.phone && !state.phone.ended ? state.phone
+      : new PhoneCall({chat_id:state.sid,decision_id:card.dataset.decisionId});
+    phone.attempt = attempt;
+    state.phone = phone;
+    phone.onAudioState = (audioState) => {
+      const button = $("resumeCallAudio");
+      if (button) button.hidden = audioState === "running" || audioState === "closed";
+    };
+    try {
+      await phone.dial(number, (st) => note(steps[st] || st));
+      break;
+    } catch (e) {
+      if (state.phone === phone) state.phone = null;
+      if (e.retry && attempt < MAX_DIAL_ATTEMPTS) {
+        note(`Exolve не принял вызов с ${attempt === 1 ? "первого" : "второго"} раза — пробую ещё раз…`);
+        await sleep(2500);
+        continue;
+      }
+      buttons.forEach((x) => (x.disabled = false));
+      note(`${e.message} Можно проверить номер и нажать «${label}» ещё раз.`, true);
+      return;
+    }
   }
   // продавец положил трубку: ближайшее ожидание ответа (listenPhone) сообщит агенту
   phone.onEnded = () => {

@@ -231,7 +231,10 @@ class PhoneScope(unittest.TestCase):
             self.assertEqual(owner.post('/api/tts',json={'text':'Ещё'},headers=auth).status_code,403,'Старый токен не оживает')
             from backend.db.models import PhoneGrant
             with db.session() as row_session:row_session.get(PhoneGrant,fresh.split('.')[0]).status='connected'
-            owner.post('/api/phone/close',headers={**headers,'X-Phone-Grant':fresh})
+            with self.assertLogs('agent.runtime',level='INFO') as logs:
+                owner.post('/api/phone/close',headers={**headers,'X-Phone-Grant':fresh},
+                           json={'stage':'setup','cause':'Unavailable','code':480,'reason':'Temporarily Unavailable','attempt':1})
+            self.assertIn('"code": "480"',''.join(logs.output),'Причина срыва из браузера попадает в журнал')
             self.assertEqual(owner.post('/api/phone',json=payload,headers=headers).status_code,409,'Разговор состоялся — повтор только через агента')
 
     def test_public_phone_without_operator_pin_is_closed(self):
